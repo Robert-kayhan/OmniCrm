@@ -1,0 +1,656 @@
+// ---------------------------------------------------------------------------
+// Omni CRM — Prisma schema
+//
+// Design rules:
+//   1. Every tenant-owned row carries `organizationId`. There is no global data.
+//   2. Nothing in this schema is Facebook-specific. Facebook is one value of the
+//      `IntegrationType` / `Channel` enums; adding WhatsApp is an enum value plus
+//      a provider class, never a migration of the conversation system.
+//   3. External identities live on `CustomerChannel`, never on `Customer`.
+//   4. Idempotency keys (`WebhookEvent.externalEventId`, `Message.externalMessageId`)
+//      are unique so redelivered provider webhooks cannot duplicate rows.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "cjs"
+  importFileExtension = ""
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  MANAGER
+  AGENT
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  INVITED
+}
+
+/// Every channel the CRM can talk over. Adding a channel starts here.
+enum Channel {
+  FACEBOOK
+  INSTAGRAM
+  EMAIL
+  WEBSITE
+  WHATSAPP
+}
+
+enum IntegrationType {
+  FACEBOOK
+  INSTAGRAM
+  EMAIL
+  WEBSITE
+  WHATSAPP
+}
+
+enum IntegrationStatus {
+  PENDING
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum CustomerStatus {
+  LEAD
+  PROSPECT
+  CUSTOMER
+  INACTIVE
+  LOST
+}
+
+enum CustomerSource {
+  MANUAL
+  IMPORT
+  API
+  FACEBOOK
+  INSTAGRAM
+  EMAIL
+  WEBSITE
+  WHATSAPP
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  CLOSED
+}
+
+enum ConversationPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum SenderType {
+  CUSTOMER
+  AGENT
+  SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  FILE
+  SYSTEM
+}
+
+/// Delivery lifecycle of an outbound message. Inbound messages are created as DELIVERED.
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  FAILED
+  IGNORED
+  DUPLICATE
+}
+
+enum NotificationType {
+  NEW_MESSAGE
+  CONVERSATION_ASSIGNED
+  CONVERSATION_REASSIGNED
+  CONVERSATION_STATUS_CHANGED
+  NEW_CUSTOMER
+  SYSTEM
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id   String @id @default(cuid())
+  name String
+  slug String @unique
+
+  users         User[]
+  teams         Team[]
+  integrations  Integration[]
+  customers     Customer[]
+  conversations Conversation[]
+  messages      Message[]
+  tags          Tag[]
+  notes         Note[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("organizations")
+}
+
+model User {
+  id             String @id @default(cuid())
+  organizationId String
+
+  name         String
+  /// Globally unique: login is by email alone, no tenant selector required.
+  email        String     @unique
+  /// Argon2id/bcrypt hash. Null only while status = INVITED.
+  password     String?
+  role         UserRole   @default(AGENT)
+  status       UserStatus @default(ACTIVE)
+  avatar       String?
+  lastSeenAt   DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  teams                UserTeam[]
+  refreshTokens        RefreshToken[]
+  assignedConversations Conversation[]          @relation("ConversationAssignee")
+  assignmentsReceived  ConversationAssignment[] @relation("AssignmentAssignee")
+  assignmentsMade      ConversationAssignment[] @relation("AssignmentActor")
+  sentMessages         Message[]                @relation("MessageSender")
+  notes                Note[]
+  notifications        Notification[]
+  auditLogs            AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, role])
+  @@index([organizationId, status])
+  @@map("users")
+}
+
+model Team {
+  id             String  @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  members               UserTeam[]
+  assignedConversations Conversation[]           @relation("ConversationTeam")
+  assignments           ConversationAssignment[] @relation("AssignmentTeam")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("teams")
+}
+
+model UserTeam {
+  id     String @id @default(cuid())
+  userId String
+  teamId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, teamId])
+  @@index([teamId])
+  @@map("user_teams")
+}
+
+/// Refresh tokens are stored hashed so a database leak cannot mint sessions.
+/// Rotation: refreshing revokes the presented token and links it to its successor.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  /// Set when this token was rotated; used to detect refresh-token replay.
+  replacedBy String?
+  userAgent String?
+  ipAddress String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Channel integrations (provider-agnostic)
+// ---------------------------------------------------------------------------
+
+model Integration {
+  id             String            @id @default(cuid())
+  organizationId String
+  type           IntegrationType
+  name           String
+  status         IntegrationStatus @default(PENDING)
+
+  /// AES-256-GCM ciphertext. Never returned by any API response.
+  accessToken       String?
+  /// AES-256-GCM ciphertext.
+  refreshToken      String?
+  tokenExpiresAt    DateTime?
+  /// Provider account/business id (Meta app-scoped user id, mailbox owner, ...).
+  externalAccountId String?
+  /// Provider inbox id (Facebook Page id, IG business account id, mailbox address, ...).
+  externalPageId    String?
+  /// Non-secret provider details safe to show in the UI (page name, category, ...).
+  metadata          Json?
+  lastError         String?
+  lastSyncedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  customerChannels CustomerChannel[]
+  conversations    Conversation[]
+  webhookEvents    WebhookEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// A given provider inbox may only be connected to one organization, so an
+  /// inbound webhook always resolves to exactly one tenant.
+  @@unique([type, externalPageId])
+  @@index([organizationId])
+  @@index([organizationId, type])
+  @@map("integrations")
+}
+
+// ---------------------------------------------------------------------------
+// Customers and their per-channel identities
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id             String @id @default(cuid())
+  organizationId String
+
+  firstName String
+  lastName  String?
+  email     String?
+  phone     String?
+  company   String?
+  avatar    String?
+  location  String?
+
+  status CustomerStatus @default(LEAD)
+  source CustomerSource @default(MANUAL)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  channels      CustomerChannel[]
+  conversations Conversation[]
+  tags          CustomerTag[]
+  notes         Note[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, email])
+  @@index([organizationId, phone])
+  @@map("customers")
+}
+
+/// One row per (customer, provider identity). This is what makes a single
+/// customer record reachable over Facebook, Instagram, email and WhatsApp.
+model CustomerChannel {
+  id            String  @id @default(cuid())
+  customerId    String
+  integrationId String
+  channel       Channel
+
+  /// Provider-scoped id: Messenger PSID, IG-scoped id, email address, ...
+  externalUserId String
+  username       String?
+  profileUrl     String?
+  avatar         String?
+  metadata       Json?
+
+  customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  conversations Conversation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Hard guarantee against duplicate external identities.
+  @@unique([integrationId, externalUserId])
+  @@index([customerId])
+  @@index([channel, externalUserId])
+  @@map("customer_channels")
+}
+
+// ---------------------------------------------------------------------------
+// Conversations and messages
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id                String  @id @default(cuid())
+  organizationId    String
+  customerId        String
+  /// Null for internal/manual conversations that are not bound to a provider.
+  integrationId     String?
+  customerChannelId String?
+  channel           Channel
+  subject           String?
+
+  status   ConversationStatus   @default(OPEN)
+  priority ConversationPriority @default(NORMAL)
+
+  /// Denormalised current assignment; full history lives in ConversationAssignment.
+  assignedUserId String?
+  assignedTeamId String?
+
+  lastMessageAt         DateTime?
+  lastCustomerMessageAt DateTime?
+  /// Unread inbound messages, reset when an agent opens the conversation.
+  unreadCount           Int       @default(0)
+  closedAt              DateTime?
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer        Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  integration     Integration?     @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  customerChannel CustomerChannel? @relation(fields: [customerChannelId], references: [id], onDelete: SetNull)
+  assignedUser    User?            @relation("ConversationAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedTeam    Team?            @relation("ConversationTeam", fields: [assignedTeamId], references: [id], onDelete: SetNull)
+
+  messages      Message[]
+  assignments   ConversationAssignment[]
+  tags          ConversationTag[]
+  notes         Note[]
+  notifications Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, status, lastMessageAt])
+  @@index([organizationId, lastMessageAt])
+  @@index([organizationId, assignedUserId])
+  @@index([organizationId, assignedTeamId])
+  @@index([organizationId, channel])
+  @@index([customerId])
+  @@index([customerChannelId, status])
+  @@map("conversations")
+}
+
+model Message {
+  id             String @id @default(cuid())
+  conversationId String
+  /// Denormalised from the conversation so tenant scoping and message search
+  /// never need a join.
+  organizationId String
+
+  senderType   SenderType
+  senderUserId String?
+
+  /// Provider message id (Meta `mid`, RFC 5322 Message-ID, ...). Unique so a
+  /// redelivered webhook is a no-op.
+  externalMessageId String? @unique
+
+  messageType MessageType   @default(TEXT)
+  content     String?
+  /// Internal notes are never delivered to the customer by any provider.
+  isInternal  Boolean       @default(false)
+  status      MessageStatus @default(DELIVERED)
+  failureReason String?
+  metadata    Json?
+  deliveredAt DateTime?
+  readAt      DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender       User?        @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  attachments MessageAttachment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([conversationId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("messages")
+}
+
+model MessageAttachment {
+  id        String      @id @default(cuid())
+  messageId String
+  type      MessageType @default(FILE)
+  url       String
+  name      String?
+  mimeType  String?
+  size      Int?
+  /// Provider attachment id, when the provider exposes one.
+  externalId String?
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([messageId])
+  @@map("message_attachments")
+}
+
+/// Append-only assignment history. The open row (unassignedAt = null) mirrors
+/// Conversation.assignedUserId / assignedTeamId.
+model ConversationAssignment {
+  id             String @id @default(cuid())
+  conversationId String
+
+  assignedUserId String?
+  assignedTeamId String?
+  /// The user who performed the assignment; null when assigned by automation.
+  assignedById   String?
+  note           String?
+
+  assignedAt   DateTime  @default(now())
+  unassignedAt DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  assignedUser User?        @relation("AssignmentAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedTeam Team?        @relation("AssignmentTeam", fields: [assignedTeamId], references: [id], onDelete: SetNull)
+  assignedBy   User?        @relation("AssignmentActor", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, assignedAt])
+  @@index([conversationId, unassignedAt])
+  @@map("conversation_assignments")
+}
+
+// ---------------------------------------------------------------------------
+// Tags, notes
+// ---------------------------------------------------------------------------
+
+model Tag {
+  id             String  @id @default(cuid())
+  organizationId String
+  name           String
+  color          String  @default("#64748b")
+  description    String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  customers     CustomerTag[]
+  conversations ConversationTag[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("tags")
+}
+
+model CustomerTag {
+  id         String @id @default(cuid())
+  customerId String
+  tagId      String
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([customerId, tagId])
+  @@index([tagId])
+  @@map("customer_tags")
+}
+
+model ConversationTag {
+  id             String @id @default(cuid())
+  conversationId String
+  tagId          String
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  tag          Tag          @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([conversationId, tagId])
+  @@index([tagId])
+  @@map("conversation_tags")
+}
+
+/// Private, agent-only annotation. Never leaves the CRM.
+model Note {
+  id             String  @id @default(cuid())
+  organizationId String
+  userId         String
+  customerId     String?
+  conversationId String?
+  content        String
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([customerId, createdAt])
+  @@index([conversationId, createdAt])
+  @@map("notes")
+}
+
+// ---------------------------------------------------------------------------
+// Operational tables
+// ---------------------------------------------------------------------------
+
+/// Raw provider deliveries. Written before processing so a crash mid-handler is
+/// replayable, and so duplicates are provably rejected.
+model WebhookEvent {
+  id            String  @id @default(cuid())
+  integrationId String?
+  /// Lowercase provider slug: "facebook", "instagram", "whatsapp", ...
+  provider      String
+  eventType     String
+  /// Provider-supplied dedupe key (Meta `mid`, delivery id, ...).
+  externalEventId String?
+  payload       Json
+  status        WebhookEventStatus @default(RECEIVED)
+  error         String?
+  attempts      Int                @default(0)
+
+  integration Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  @@unique([provider, externalEventId])
+  @@index([status, receivedAt])
+  @@index([integrationId, receivedAt])
+  @@map("webhook_events")
+}
+
+model Notification {
+  id             String  @id @default(cuid())
+  organizationId String
+  userId         String
+  conversationId String?
+
+  type    NotificationType
+  title   String
+  message String
+  isRead  Boolean          @default(false)
+  readAt  DateTime?
+  data    Json?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id             String  @id @default(cuid())
+  organizationId String
+  userId         String?
+
+  /// Dotted action key, e.g. "auth.login", "conversation.assigned".
+  action     String
+  entityType String
+  entityId   String?
+  oldData    Json?
+  newData    Json?
+  ipAddress  String?
+  userAgent  String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}

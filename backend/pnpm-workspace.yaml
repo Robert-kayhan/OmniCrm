@@ -1,0 +1,10 @@
+# Prisma and esbuild ship postinstall scripts that must run: Prisma downloads
+# its query engine, esbuild its native binary. pnpm blocks build scripts by
+# default and fails the install unless they are allowlisted.
+#
+# Duplicated from package.json's `pnpm.onlyBuiltDependencies` on purpose:
+# pnpm 10 reads it there, pnpm 11 reads it here.
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - esbuild
+  - prisma

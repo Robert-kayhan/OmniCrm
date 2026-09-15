@@ -1,0 +1,115 @@
+name: omni-crm
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: omni-crm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omni}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omni_local_password}
+      POSTGRES_DB: ${POSTGRES_DB:-omni_crm}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The API waits for this before running migrations.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omni} -d ${POSTGRES_DB:-omni_crm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: omni-crm-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: omni-crm-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 4000
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Service names, not localhost: these resolve on the compose network.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-omni}:${POSTGRES_PASSWORD:-omni_local_password}@postgres:5432/${POSTGRES_DB:-omni_crm}?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — copy .env.example to .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-30d}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required (64 hex characters)}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      BACKEND_URL: ${BACKEND_URL:-http://localhost:4000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-10}
+      ENABLE_DEV_TOOLS: ${ENABLE_DEV_TOOLS:-true}
+      ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-true}
+      META_APP_ID: ${META_APP_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_PAGE_ID: ${META_PAGE_ID:-}
+      META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN:-}
+      META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-v21.0}
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    # Migrations run on boot so a fresh `docker compose up` produces a working
+    # database without a manual step.
+    command: sh -c "pnpm exec prisma migrate deploy && node dist/server.js"
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-http://localhost:4000}
+    container_name: omni-crm-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Read by the browser, so it must be an address the browser can reach —
+      # not the compose service name.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-http://localhost:4000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+
+volumes:
+  postgres-data:
+  redis-data:
