@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { AlertTriangle, CheckCircle2, Link2Off, Plug, Plus } from 'lucide-react';
 import { Topbar } from '@/components/shell/topbar';
@@ -37,7 +37,12 @@ import { PERMISSIONS, useAuth } from '@/lib/auth';
 import { formatRelative } from '@/lib/format';
 import { useChannelCatalogue } from '@/lib/hooks';
 import { queryKeys } from '@/lib/query-keys';
-import type { ChannelCapability, Integration, IntegrationStatus } from '@/lib/types';
+import type {
+  ChannelCapability,
+  Integration,
+  IntegrationStatus,
+  SelectablePage,
+} from '@/lib/types';
 
 const STATUS_BADGE: Record<IntegrationStatus, { variant: 'success' | 'warning' | 'muted' | 'destructive'; label: string }> = {
   CONNECTED: { variant: 'success', label: 'Connected' },
@@ -165,6 +170,171 @@ function ConnectFacebookDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+
+/**
+ * The Page picker.
+ *
+ * Opens when the operator lands back from Meta with a handoff id in the URL.
+ * The handoff holds the Page tokens server-side; this component only ever sees
+ * names and ids, and posts back the id the operator chose.
+ */
+function FacebookPagePicker({
+  handoffId,
+  onDone,
+}: {
+  handoffId: string;
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [pendingPageId, setPendingPageId] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['facebook-oauth-pages', handoffId],
+    queryFn: () => api.integrations.facebookPages(handoffId),
+    // The handoff expires in ten minutes; a stale refetch would 404 for a
+    // reason the operator cannot act on.
+    retry: false,
+    staleTime: Infinity,
+  });
+
+  const connect = useMutation({
+    mutationFn: (page: SelectablePage) =>
+      api.integrations.connectFacebookPage({ handoffId, pageId: page.id, name: page.name }),
+    onMutate: (page) => setPendingPageId(page.id),
+    onSettled: () => setPendingPageId(null),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.conversations.all });
+
+      const { messagesCreated, threads } = result.import;
+      toast.success(
+        messagesCreated > 0
+          ? `${result.integration.name} connected — imported ${messagesCreated} messages from ${threads} conversations`
+          : `${result.integration.name} connected. New messages will appear as they arrive.`,
+      );
+      onDone();
+    },
+    onError: (caught) =>
+      toast.error(
+        caught instanceof ApiError ? caught.message : 'Could not connect that Page. Try again.',
+      ),
+  });
+
+  return (
+    <Dialog open onOpenChange={(next) => (next ? undefined : onDone())}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Choose a Page</DialogTitle>
+          <DialogDescription>
+            These are the Facebook Pages your account administers. Connecting one subscribes it to
+            this app&apos;s webhook and imports its recent conversations.
+          </DialogDescription>
+        </DialogHeader>
+
+        {isLoading ? (
+          <div className="space-y-2">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <Skeleton key={index} className="h-14" />
+            ))}
+          </div>
+        ) : error ? (
+          <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error instanceof ApiError
+              ? error.message
+              : 'This Facebook login has expired. Start the connection again.'}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {data?.pages.map((page) => {
+              const busy = connect.isPending && pendingPageId === page.id;
+              return (
+                <div
+                  key={page.id}
+                  className="flex items-center gap-3 rounded-lg border p-3"
+                >
+                  {page.pictureUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={page.pictureUrl}
+                      alt=""
+                      className="size-9 shrink-0 rounded-full object-cover"
+                    />
+                  ) : (
+                    <div className="size-9 shrink-0 rounded-full bg-muted" />
+                  )}
+
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{page.name}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {page.category ?? `Page ${page.id}`}
+                    </p>
+                  </div>
+
+                  {page.unavailable ? (
+                    <Badge variant="muted" className="shrink-0">
+                      Another workspace
+                    </Badge>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant={page.connectedHere ? 'outline' : 'default'}
+                      onClick={() => connect.mutate(page)}
+                      disabled={connect.isPending}
+                    >
+                      {busy ? <Spinner /> : null}
+                      {page.connectedHere ? 'Reconnect' : 'Connect'}
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onDone}>
+            Cancel
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The one-click entry point.
+ *
+ * Asks the API where to send the browser rather than building the Meta URL
+ * here — the app id and scopes are server configuration, and duplicating them
+ * in the bundle would let the two drift apart.
+ */
+function ConnectWithFacebookButton({ disabled }: { disabled: boolean }) {
+  const start = useMutation({
+    mutationFn: () => api.integrations.facebookOAuthUrl(),
+    onSuccess: ({ authorizeUrl }) => {
+      // A full navigation, not a popup: Meta blocks its login dialog inside
+      // many popup contexts, and the callback redirects straight back here.
+      window.location.href = authorizeUrl;
+    },
+    onError: (caught) =>
+      toast.error(
+        caught instanceof ApiError ? caught.message : 'Could not start the Facebook login.',
+      ),
+  });
+
+  return (
+    <Button
+      size="sm"
+      onClick={() => start.mutate()}
+      disabled={disabled || start.isPending}
+      className="bg-[#1877F2] text-white hover:bg-[#1877F2]/90"
+    >
+      {start.isPending ? <Spinner /> : <ChannelIcon channel="FACEBOOK" className="size-3.5" />}
+      Connect with Facebook
+    </Button>
   );
 }
 
@@ -303,15 +473,24 @@ function ChannelCard({ capability }: { capability: ChannelCapability }) {
               </p>
             ) : null}
 
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setDialogOpen(true)}
-              disabled={!capability.configured}
-            >
-              <Plus className="size-3.5" />
-              Connect a Page
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <ConnectWithFacebookButton disabled={!capability.configured} />
+
+              {/*
+                The original paste-a-token path, kept for the cases OAuth cannot
+                serve: a System User token, or a Page whose admin cannot log in
+                here. Secondary, because it is no longer the normal route.
+              */}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setDialogOpen(true)}
+                disabled={!capability.configured}
+              >
+                <Plus className="size-3.5" />
+                Enter a token manually
+              </Button>
+            </div>
 
             <ConnectFacebookDialog open={dialogOpen} onOpenChange={setDialogOpen} />
           </>
@@ -323,10 +502,44 @@ function ChannelCard({ capability }: { capability: ChannelCapability }) {
 
 export default function IntegrationsPage() {
   const { data: catalogue, isLoading } = useChannelCatalogue();
+  const [handoffId, setHandoffId] = useState<string | null>(null);
+
+  /**
+   * Strips the OAuth result out of the URL as soon as it is read.
+   *
+   * Read from `window.location` rather than `useSearchParams` so the page needs
+   * no Suspense boundary, and replaced rather than pushed so Back does not
+   * re-trigger a spent handoff.
+   */
+  const clearCallbackParams = useCallback(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('fb_handoff');
+    url.searchParams.delete('fb_error');
+    window.history.replaceState({}, '', url.toString());
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const handoff = params.get('fb_handoff');
+    const failure = params.get('fb_error');
+
+    // Reading the URL is a genuine external-system sync and happens exactly
+    // once, on the mount that follows Meta's redirect. A lazy useState
+    // initializer would be the usual alternative, but it reads `window` during
+    // render and so hydrates differently from the server's null.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (handoff) setHandoffId(handoff);
+    if (failure) toast.error(failure);
+    if (handoff || failure) clearCallbackParams();
+  }, [clearCallbackParams]);
 
   return (
     <>
       <Topbar title="Integrations" />
+
+      {handoffId ? (
+        <FacebookPagePicker handoffId={handoffId} onDone={() => setHandoffId(null)} />
+      ) : null}
 
       <div className="scrollbar-thin min-h-0 flex-1 overflow-auto p-4">
         <div className="mx-auto max-w-3xl space-y-4">

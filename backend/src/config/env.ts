@@ -27,6 +27,17 @@ const csv = z
       .filter(Boolean),
   );
 
+/**
+ * Treats an empty string as an absent value.
+ *
+ * Docker compose renders an unset `${VAR:-}` as `VAR=""` rather than omitting
+ * it, so an optional-but-validated variable would otherwise fail its format
+ * check on a perfectly normal deployment.
+ */
+function blankAsUndefined<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((value) => (value === '' ? undefined : value), schema.optional());
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65_535).default(4000),
@@ -87,6 +98,26 @@ const envSchema = z.object({
   META_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
   META_GRAPH_API_VERSION: z.string().default('v21.0'),
   META_GRAPH_API_BASE_URL: z.url().default('https://graph.facebook.com'),
+
+  // Where Meta sends the browser back after the operator approves the app.
+  // Must match a "Valid OAuth Redirect URI" in the Meta app dashboard exactly,
+  // including the scheme and any trailing path. Defaults to this API's own
+  // callback so a single-host deployment needs no extra configuration.
+  //
+  // `blankAsUndefined` matters for docker compose, which passes unset variables
+  // through as empty strings — `z.url()` would reject `""` and the API would
+  // refuse to boot rather than fall back to the default below.
+  META_OAUTH_REDIRECT_URI: blankAsUndefined(z.url()),
+
+  // Permissions requested during Facebook Login. `pages_show_list` lists the
+  // Pages the operator admins, `pages_messaging` sends and receives, and
+  // `pages_manage_metadata` is what allows subscribing the Page to this app's
+  // webhook — without it a connect succeeds but no message ever arrives.
+  META_OAUTH_SCOPES: z
+    .string()
+    .default(
+      'pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management',
+    ),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -149,3 +180,13 @@ export const allowedOrigins: string[] = Array.from(
 export const isMetaConfigured = Boolean(
   env.META_APP_ID && env.META_APP_SECRET && env.META_WEBHOOK_VERIFY_TOKEN,
 );
+
+/**
+ * The OAuth redirect Meta will call.
+ *
+ * Derived from BACKEND_URL when unset so the common single-host deployment
+ * works with no extra variable, while a split-host or tunnelled setup can
+ * override it to the public URL Meta can actually reach.
+ */
+export const metaOAuthRedirectUri =
+  env.META_OAUTH_REDIRECT_URI ?? `${env.BACKEND_URL}/api/integrations/facebook/oauth/callback`;

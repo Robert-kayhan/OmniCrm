@@ -438,3 +438,40 @@ export interface PresencePayload {
   online: boolean;
   lastSeenAt: string | null;
 }
+
+/**
+ * A Facebook Page offered by the connect flow.
+ *
+ * Note there is no token field: Page access tokens stay on the server, held
+ * encrypted between the OAuth callback and the operator's choice.
+ */
+export interface SelectablePage {
+  id: string;
+  name: string;
+  category: string | null;
+  pictureUrl: string | null;
+  /** Already delivering to this app's webhook. */
+  alreadySubscribed: boolean;
+  /** Claimed by another workspace, so it cannot be connected here. */
+  unavailable: boolean;
+  /** Already connected to this workspace. */
+  connectedHere: boolean;
+}
+
+export interface FacebookLoginResult {
+  handoffId: string;
+  pages: SelectablePage[];
+}
+
+/** What the one-off history backfill found when the Page was connected. */
+export interface ImportSummary {
+  threads: number;
+  messagesCreated: number;
+  duplicates: number;
+  failures: number;
+}
+
+export interface ConnectPageResult {
+  integration: Integration;
+  import: ImportSummary;
+}

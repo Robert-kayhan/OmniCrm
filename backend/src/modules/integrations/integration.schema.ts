@@ -34,3 +34,34 @@ export const updateIntegrationSchema = z
 export type ListIntegrationsQuery = z.infer<typeof listIntegrationsQuerySchema>;
 export type ConnectFacebookInput = z.infer<typeof connectFacebookSchema>;
 export type UpdateIntegrationInput = z.infer<typeof updateIntegrationSchema>;
+
+/**
+ * Meta's redirect back from the login dialog.
+ *
+ * Everything is optional because the operator may have cancelled, in which
+ * case Meta returns `error`/`error_description` and no code. The handler turns
+ * that into a friendly redirect rather than a validation failure.
+ */
+export const facebookOAuthCallbackSchema = z.object({
+  code: z.string().trim().min(1).max(1024).optional(),
+  state: z.string().trim().min(1).max(2048).optional(),
+  error: z.string().trim().max(256).optional(),
+  error_reason: z.string().trim().max(256).optional(),
+  error_description: z.string().trim().max(512).optional(),
+});
+
+/** Picking one Page out of the ones the login returned. */
+export const connectFacebookPageSchema = z.object({
+  handoffId: z.string().trim().min(1).max(256),
+  pageId: z.string().trim().min(1).max(64).regex(/^\d+$/, 'Facebook Page id must be numeric'),
+  /** Defaults to the Page's own name when omitted. */
+  name: cleanText(120, 1).optional(),
+});
+
+export type FacebookOAuthCallbackQuery = z.infer<typeof facebookOAuthCallbackSchema>;
+export type ConnectFacebookPageInput = z.infer<typeof connectFacebookPageSchema>;
+
+/** Reading back the Pages from a completed login. */
+export const facebookOAuthPagesQuerySchema = z.object({
+  handoffId: z.string().trim().min(1).max(256),
+});

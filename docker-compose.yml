@@ -75,6 +75,12 @@ services:
       META_PAGE_ACCESS_TOKEN: ${META_PAGE_ACCESS_TOKEN:-}
       META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
       META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-v21.0}
+      # Unset falls back to ${BACKEND_URL}/api/integrations/facebook/oauth/callback,
+      # which is correct whenever the API is reached directly on BACKEND_URL.
+      # Override it when a proxy terminates TLS on a different host than the
+      # container believes it serves.
+      META_OAUTH_REDIRECT_URI: ${META_OAUTH_REDIRECT_URI:-}
+      META_OAUTH_SCOPES: ${META_OAUTH_SCOPES:-pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management}
     ports:
       - "${BACKEND_PORT:-4000}:4000"
     # Migrations run on boot so a fresh `docker compose up` produces a working

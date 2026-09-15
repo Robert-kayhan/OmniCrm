@@ -78,3 +78,13 @@ export interface MetaProfileResponse {
   locale?: string;
   error?: MetaError;
 }
+
+/**
+ * The error envelope shared by every Graph response.
+ *
+ * Meta returns this alongside a 200 as readily as with a 4xx, so the OAuth
+ * client checks for it regardless of status.
+ */
+export interface MetaGraphError {
+  error?: MetaError;
+}

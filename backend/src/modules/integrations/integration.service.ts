@@ -1,3 +1,4 @@
+import { logger } from '../../config/logger';
 import { prisma, type Db } from '../../database/prisma';
 import type { Prisma } from '../../generated/prisma/client';
 import { IntegrationStatus, IntegrationType } from '../../generated/prisma/enums';
@@ -13,6 +14,7 @@ import {
   getProvider,
   type ProviderCredentials,
 } from '../../channels';
+import { unsubscribePageFromApp } from '../../channels/facebook/facebook.oauth';
 import type {
   ConnectFacebookInput,
   ListIntegrationsQuery,
@@ -313,9 +315,27 @@ export async function disconnectIntegration(
 ): Promise<IntegrationDto> {
   const existing = await prisma.integration.findFirst({
     where: { id: integrationId, organizationId: actor.organizationId },
-    select: { id: true, type: true, name: true, externalPageId: true },
+    select: { id: true, type: true, name: true, externalPageId: true, accessToken: true },
   });
   if (!existing) throw new NotFoundError('Integration', 'INTEGRATION_NOT_FOUND');
+
+  // Tell Meta to stop delivering before the token that authorises saying so is
+  // destroyed. Best-effort: a revoked or expired token makes this call fail,
+  // and refusing to disconnect because of that would strand the operator with
+  // an integration they cannot remove.
+  if (existing.type === IntegrationType.FACEBOOK && existing.externalPageId && existing.accessToken) {
+    try {
+      await unsubscribePageFromApp(
+        existing.externalPageId,
+        decryptOptionalSecret(existing.accessToken) as string,
+      );
+    } catch (error) {
+      logger.warn(
+        { err: error, integrationId, pageId: existing.externalPageId },
+        'Could not unsubscribe the Page from this app; disconnecting locally anyway',
+      );
+    }
+  }
 
   const updated = await prisma.integration.update({
     where: { id: integrationId },
@@ -335,7 +355,14 @@ export async function disconnectIntegration(
     action: AUDIT_ACTIONS.INTEGRATION_DISCONNECTED,
     entityType: AUDIT_ENTITIES.INTEGRATION,
     entityId: integrationId,
-    oldData: existing,
+    // Spread deliberately drops `accessToken`: an audit row must never carry a
+    // provider secret, even an encrypted one.
+    oldData: {
+      id: existing.id,
+      type: existing.type,
+      name: existing.name,
+      externalPageId: existing.externalPageId,
+    },
     ...context,
   });
 

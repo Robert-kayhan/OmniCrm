@@ -11,6 +11,8 @@ import type {
   Customer,
   CustomerChannel,
   CursorPaginated,
+  ConnectPageResult,
+  FacebookLoginResult,
   Integration,
   Message,
   MessageType,
@@ -501,6 +503,23 @@ export const api = {
       request<Integration>(`/integrations/${id}`, { method: 'PATCH', body: input }),
 
     disconnect: (id: string) => request<Integration>(`/integrations/${id}`, { method: 'DELETE' }),
+
+    /** Where to send the browser to start Facebook Login. */
+    facebookOAuthUrl: () =>
+      request<{ authorizeUrl: string }>('/integrations/facebook/oauth/start'),
+
+    /** The Pages behind a completed login, read back after Meta redirects. */
+    facebookPages: (handoffId: string) =>
+      request<FacebookLoginResult>(
+        `/integrations/facebook/oauth/pages?handoffId=${encodeURIComponent(handoffId)}`,
+      ),
+
+    /** Subscribes the chosen Page, stores it, and imports recent history. */
+    connectFacebookPage: (input: { handoffId: string; pageId: string; name?: string }) =>
+      request<ConnectPageResult>('/integrations/facebook/pages', {
+        method: 'POST',
+        body: input,
+      }),
   },
 
   notifications: {
