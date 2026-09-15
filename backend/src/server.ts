@@ -5,7 +5,6 @@ import { logger } from './config/logger';
 import { connectDatabase, disconnectDatabase } from './database/prisma';
 import { connectRedis, disconnectRedis } from './database/redis';
 import { logRateLimitMode } from './middleware/rate-limit';
-import { registerChannelProviders } from './channels';
 import { closeRealtime, initRealtime } from './realtime';
 
 async function bootstrap(): Promise<void> {
@@ -13,10 +12,8 @@ async function bootstrap(): Promise<void> {
   await connectRedis();
   logRateLimitMode();
 
-  // Providers register before the first request, so a send or a webhook can
-  // never race a half-built registry.
-  registerChannelProviders();
-
+  // Providers are registered by createApp itself, so the registry is populated
+  // for every consumer rather than only for this entry point.
   const app = createApp();
   const server = http.createServer(app);
 

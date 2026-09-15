@@ -514,8 +514,19 @@ export const api = {
         `/integrations/facebook/oauth/pages?handoffId=${encodeURIComponent(handoffId)}`,
       ),
 
-    /** Subscribes the chosen Page, stores it, and imports recent history. */
-    connectFacebookPage: (input: { handoffId: string; pageId: string; name?: string }) =>
+    /**
+     * Subscribes the chosen inbox, stores it, and imports recent history.
+     *
+     * `pageId` is always the Facebook Page; `channel` picks which of its two
+     * inboxes to connect, because Instagram Direct is reached through the Page
+     * it is linked to.
+     */
+    connectFacebookPage: (input: {
+      handoffId: string;
+      pageId: string;
+      channel?: 'FACEBOOK' | 'INSTAGRAM';
+      name?: string;
+    }) =>
       request<ConnectPageResult>('/integrations/facebook/pages', {
         method: 'POST',
         body: input,

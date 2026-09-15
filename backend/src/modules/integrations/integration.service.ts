@@ -14,7 +14,7 @@ import {
   getProvider,
   type ProviderCredentials,
 } from '../../channels';
-import { unsubscribePageFromApp } from '../../channels/facebook/facebook.oauth';
+import { unsubscribePageFromApp } from '../../channels/meta/meta.oauth';
 import type {
   ConnectFacebookInput,
   ListIntegrationsQuery,
@@ -200,28 +200,56 @@ export async function findIntegrationByExternalPageId(
   });
 }
 
-export async function connectFacebook(
+/** Human names for the two Meta inboxes, used in conflict and config errors. */
+const META_INBOX_LABEL: Partial<Record<IntegrationType, string>> = {
+  [IntegrationType.FACEBOOK]: 'Facebook Page',
+  [IntegrationType.INSTAGRAM]: 'Instagram account',
+};
+
+export interface ConnectMetaInboxInput {
+  type: IntegrationType;
+  name: string;
+  /** The inbox id: a Page id for Messenger, an IG account id for Instagram. */
+  inboxId: string;
+  accessToken: string;
+  /** The Page an Instagram account hangs off; null for Messenger. */
+  externalAccountId?: string | null;
+  /** Non-secret provider detail shown in the UI (username, linked page, ...). */
+  metadata?: Prisma.InputJsonValue;
+}
+
+/**
+ * Stores one connected Meta inbox.
+ *
+ * Shared by Messenger and Instagram Direct because the row is identical apart
+ * from its `type` — both are "an inbox id plus a Page token" — and by both the
+ * OAuth flow and the manual-token fallback, so a token can only ever be
+ * written by this one function.
+ */
+export async function connectMetaInbox(
   actor: AuthContext,
-  input: ConnectFacebookInput,
+  input: ConnectMetaInboxInput,
   context: ClientContext,
 ): Promise<IntegrationDto> {
+  const label = META_INBOX_LABEL[input.type] ?? 'account';
+
   // Fails fast with the missing variable named, rather than storing a token for
   // an integration that could never send.
-  const provider = getProvider(channelForIntegrationType(IntegrationType.FACEBOOK));
+  const provider = getProvider(channelForIntegrationType(input.type));
   if (!provider.isConfigured()) {
     throw new IntegrationConfigurationError(
-      'Facebook is not configured on this server. Set META_APP_ID, META_APP_SECRET and META_WEBHOOK_VERIFY_TOKEN, then restart the API.',
-      'FACEBOOK_NOT_CONFIGURED',
+      `${provider.displayName} is not configured on this server. Set META_APP_ID, META_APP_SECRET and META_WEBHOOK_VERIFY_TOKEN, then restart the API.`,
+      'META_NOT_CONFIGURED',
     );
   }
 
   const claimed = await prisma.integration.findUnique({
-    where: { type_externalPageId: { type: IntegrationType.FACEBOOK, externalPageId: input.pageId } },
+    where: { type_externalPageId: { type: input.type, externalPageId: input.inboxId } },
     select: { id: true, organizationId: true },
   });
   if (claimed && claimed.organizationId !== actor.organizationId) {
     throw new ConflictError(
-      'This Facebook Page is already connected to another workspace',
+      `This ${label} is already connected to another workspace`,
       'PAGE_ALREADY_CONNECTED',
     );
   }
@@ -229,8 +257,9 @@ export async function connectFacebook(
   const data = {
     name: input.name,
     status: IntegrationStatus.CONNECTED,
-    accessToken: encryptSecret(input.pageAccessToken),
+    accessToken: encryptSecret(input.accessToken),
     externalAccountId: input.externalAccountId ?? null,
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     lastError: null,
   };
 
@@ -243,8 +272,8 @@ export async function connectFacebook(
     : await prisma.integration.create({
         data: {
           organizationId: actor.organizationId,
-          type: IntegrationType.FACEBOOK,
-          externalPageId: input.pageId,
+          type: input.type,
+          externalPageId: input.inboxId,
           ...data,
         },
         select: { ...integrationSelect, accessToken: true },
@@ -256,13 +285,32 @@ export async function connectFacebook(
     action: AUDIT_ACTIONS.INTEGRATION_CONNECTED,
     entityType: AUDIT_ENTITIES.INTEGRATION,
     entityId: saved.id,
-    // Deliberately records the Page id and never the token.
-    newData: { type: IntegrationType.FACEBOOK, externalPageId: input.pageId, name: input.name },
+    // Deliberately records the inbox id and never the token.
+    newData: { type: input.type, externalPageId: input.inboxId, name: input.name },
     ...context,
   });
 
   const { accessToken, ...rest } = saved;
   return toIntegrationDto(rest, Boolean(accessToken));
+}
+
+/** The manual paste-a-token route for Facebook. */
+export async function connectFacebook(
+  actor: AuthContext,
+  input: ConnectFacebookInput,
+  context: ClientContext,
+): Promise<IntegrationDto> {
+  return connectMetaInbox(
+    actor,
+    {
+      type: IntegrationType.FACEBOOK,
+      name: input.name,
+      inboxId: input.pageId,
+      accessToken: input.pageAccessToken,
+      externalAccountId: input.externalAccountId ?? null,
+    },
+    context,
+  );
 }
 
 export async function updateIntegration(

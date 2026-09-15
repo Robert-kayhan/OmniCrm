@@ -50,11 +50,20 @@ export const facebookOAuthCallbackSchema = z.object({
   error_description: z.string().trim().max(512).optional(),
 });
 
-/** Picking one Page out of the ones the login returned. */
+/**
+ * Picking one inbox out of the ones the login returned.
+ *
+ * `pageId` always identifies the Facebook Page, for both channels: Instagram
+ * Direct is reached through the Page it is linked to, and `channel` selects
+ * which of the Page's two inboxes is connected.
+ */
 export const connectFacebookPageSchema = z.object({
   handoffId: z.string().trim().min(1).max(256),
   pageId: z.string().trim().min(1).max(64).regex(/^\d+$/, 'Facebook Page id must be numeric'),
-  /** Defaults to the Page's own name when omitted. */
+  channel: z
+    .enum([IntegrationType.FACEBOOK, IntegrationType.INSTAGRAM])
+    .default(IntegrationType.FACEBOOK),
+  /** Defaults to the Page or Instagram handle when omitted. */
   name: cleanText(120, 1).optional(),
 });
 

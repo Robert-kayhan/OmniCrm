@@ -2,14 +2,18 @@ import { logger } from '../../config/logger';
 import { prisma } from '../../database/prisma';
 import { Channel, MessageType } from '../../generated/prisma/enums';
 import type { NormalizedAttachment, NormalizedMessage } from '../../channels';
-import { fetchRecentConversations, type MetaThread } from '../../channels/facebook/facebook.oauth';
+import {
+  fetchRecentConversations,
+  type MetaPlatform,
+  type MetaThread,
+} from '../../channels/meta/meta.oauth';
 import {
   ingestNormalizedMessage,
   type ResolvedIntegration,
 } from '../conversations/conversation.ingest';
 
 /**
- * Backfilling the threads that already exist on a Page.
+ * Backfilling the threads that already exist on a Page or Instagram account.
  *
  * Webhooks only deliver what arrives after the Page is subscribed, so a freshly
  * connected Page would otherwise show an empty inbox until a customer happened
@@ -60,7 +64,14 @@ function attachmentTypeFromMime(mime: string | null): MessageType {
  * parts of the import worth pinning down, and driving them through the whole
  * Graph call would need a live Page.
  */
-export function toNormalizedMessages(thread: MetaThread, pageId: string): NormalizedMessage[] {
+export function toNormalizedMessages(
+  thread: MetaThread,
+  /** The inbox id messages are attributed to: a Page id, or an IG account id. */
+  inboxId: string,
+  channel: Channel = Channel.FACEBOOK,
+  /** Every id that counts as the business, used to decide message direction. */
+  selfIds: string[] = [inboxId],
+): NormalizedMessage[] {
   // No identifiable customer means nothing to attribute the thread to.
   if (!thread.participantId) return [];
 
@@ -80,13 +91,15 @@ export function toNormalizedMessages(thread: MetaThread, pageId: string): Normal
 
     if (!message.message && attachments.length === 0) continue;
 
-    // The Page is one participant and the customer the other, so the sender id
-    // is the whole direction check.
-    const isFromPage = message.fromId === pageId;
+    // The business is one participant and the customer the other, so the
+    // sender id is the whole direction check. Instagram reports the IG account
+    // id here rather than the Page id, which is why the caller passes the full
+    // set rather than a single id.
+    const isFromPage = Boolean(message.fromId && selfIds.includes(message.fromId));
 
     normalized.push({
-      channel: Channel.FACEBOOK,
-      externalPageId: pageId,
+      channel,
+      externalPageId: inboxId,
       externalMessageId: message.id,
       externalConversationId: thread.id,
       contact: {
@@ -99,7 +112,7 @@ export function toNormalizedMessages(thread: MetaThread, pageId: string): Normal
       attachments,
       sentAt: new Date(message.createdTime),
       metadata: {
-        provider: 'facebook',
+        provider: channel.toLowerCase(),
         // Marks rows that came from the history import rather than a live
         // delivery, which is the first thing to check when a backfilled thread
         // looks wrong.
@@ -119,21 +132,46 @@ export function toNormalizedMessages(thread: MetaThread, pageId: string): Normal
  * because Meta rate-limited the history read. Failures are counted, logged and
  * recorded on the integration, and the Page still receives live messages.
  */
-export async function importRecentHistory(
-  integration: ResolvedIntegration,
-  pageId: string,
-  pageAccessToken: string,
-  limits: { threadLimit: number; messageLimit: number } = DEFAULT_IMPORT_LIMITS,
-): Promise<ImportSummary> {
+export interface ImportHistoryInput {
+  integration: ResolvedIntegration;
+  /** The Page whose conversations edge is read — a Page id for both channels. */
+  pageId: string;
+  /**
+   * The inbox messages are attributed to. The Page id for Messenger, the
+   * Instagram account id for Instagram Direct, because that is what the
+   * webhook reports and what resolves the integration.
+   */
+  inboxId: string;
+  accessToken: string;
+  channel: Channel;
+  limits?: { threadLimit: number; messageLimit: number };
+}
+
+export async function importRecentHistory(input: ImportHistoryInput): Promise<ImportSummary> {
+  const { integration, pageId, inboxId, accessToken, channel } = input;
+  const limits = input.limits ?? DEFAULT_IMPORT_LIMITS;
+  const platform: MetaPlatform = channel === Channel.INSTAGRAM ? 'instagram' : 'messenger';
+
+  // Both ids count as the business: a Messenger thread reports the Page as
+  // sender, an Instagram thread reports the IG account.
+  const selfIds = Array.from(new Set([pageId, inboxId]));
+
   const summary: ImportSummary = { threads: 0, messagesCreated: 0, duplicates: 0, failures: 0 };
 
   let threads: MetaThread[];
   try {
-    threads = await fetchRecentConversations(pageId, pageAccessToken, limits);
+    threads = await fetchRecentConversations({
+      pageId,
+      accessToken,
+      platform,
+      selfIds,
+      threadLimit: limits.threadLimit,
+      messageLimit: limits.messageLimit,
+    });
   } catch (error) {
     logger.warn(
-      { err: error, integrationId: integration.id, pageId },
-      'Facebook history import could not read conversations; live messages are unaffected',
+      { err: error, integrationId: integration.id, pageId, platform },
+      'Meta history import could not read conversations; live messages are unaffected',
     );
     summary.failures += 1;
     return summary;
@@ -142,7 +180,7 @@ export async function importRecentHistory(
   summary.threads = threads.length;
 
   for (const thread of threads) {
-    for (const normalized of toNormalizedMessages(thread, pageId)) {
+    for (const normalized of toNormalizedMessages(thread, inboxId, channel, selfIds)) {
       try {
         const result = await ingestNormalizedMessage(integration, normalized);
         if (result.created) summary.messagesCreated += 1;
@@ -163,6 +201,9 @@ export async function importRecentHistory(
     data: { lastSyncedAt: new Date() },
   });
 
-  logger.info({ integrationId: integration.id, pageId, ...summary }, 'Facebook history import finished');
+  logger.info(
+    { integrationId: integration.id, pageId, inboxId, channel, ...summary },
+    'Meta history import finished',
+  );
   return summary;
 }

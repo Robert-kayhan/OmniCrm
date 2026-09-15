@@ -80,7 +80,7 @@ services:
       # Override it when a proxy terminates TLS on a different host than the
       # container believes it serves.
       META_OAUTH_REDIRECT_URI: ${META_OAUTH_REDIRECT_URI:-}
-      META_OAUTH_SCOPES: ${META_OAUTH_SCOPES:-pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management}
+      META_OAUTH_SCOPES: ${META_OAUTH_SCOPES:-pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,instagram_basic,instagram_manage_messages,business_management}
     ports:
       - "${BACKEND_PORT:-4000}:4000"
     # Migrations run on boot so a fresh `docker compose up` produces a working

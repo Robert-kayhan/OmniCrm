@@ -439,23 +439,39 @@ export interface PresencePayload {
   lastSeenAt: string | null;
 }
 
+/** Whether a given inbox can be claimed by this workspace. */
+interface InboxAvailability {
+  /** Claimed by another workspace, so it cannot be connected here. */
+  unavailable: boolean;
+  /** Already connected to this workspace. */
+  connectedHere: boolean;
+}
+
+/** The Instagram Professional account linked to a Page, if there is one. */
+export interface SelectableInstagram extends InboxAvailability {
+  id: string;
+  username: string | null;
+  name: string | null;
+  pictureUrl: string | null;
+}
+
 /**
  * A Facebook Page offered by the connect flow.
  *
  * Note there is no token field: Page access tokens stay on the server, held
- * encrypted between the OAuth callback and the operator's choice.
+ * encrypted between the OAuth callback and the operator's choice. One Page can
+ * yield two inboxes — Messenger and Instagram Direct — which connect
+ * independently.
  */
-export interface SelectablePage {
+export interface SelectablePage extends InboxAvailability {
   id: string;
   name: string;
   category: string | null;
   pictureUrl: string | null;
   /** Already delivering to this app's webhook. */
   alreadySubscribed: boolean;
-  /** Claimed by another workspace, so it cannot be connected here. */
-  unavailable: boolean;
-  /** Already connected to this workspace. */
-  connectedHere: boolean;
+  /** Null when no Professional Instagram account is linked to this Page. */
+  instagram: SelectableInstagram | null;
 }
 
 export interface FacebookLoginResult {

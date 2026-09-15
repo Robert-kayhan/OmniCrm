@@ -1,28 +1,61 @@
 import type { Request, Response } from 'express';
 import { logger } from '../../config/logger';
-import { facebookProvider } from '../../channels/facebook/facebook.provider';
+import { findProviderBySlug } from '../../channels';
+import type { MessagingProvider } from '../../channels';
 import { handleProviderDelivery, recordWebhookDelivery } from './webhook.service';
 
 /**
- * Meta's subscription handshake.
+ * The public provider callback surface.
+ *
+ * One pair of handlers serves every channel: the slug in the URL
+ * (`/api/webhooks/facebook`, `/api/webhooks/instagram`) selects the provider,
+ * and the provider decides how its own deliveries are authenticated and
+ * parsed. A new channel gets a working webhook by registering its provider —
+ * this file does not change.
+ */
+
+/**
+ * Resolves `:provider` to a registered provider.
+ *
+ * An unknown or unimplemented slug answers 404 with no detail. This endpoint is
+ * public, so it should not confirm which channels a deployment has built.
+ */
+function resolveProvider(req: Request, res: Response): MessagingProvider | null {
+  const slug = typeof req.params.provider === 'string' ? req.params.provider : '';
+  const provider = findProviderBySlug(slug);
+
+  if (!provider) {
+    logger.warn({ slug }, 'Webhook received for an unknown provider');
+    res.status(404).send('Not Found');
+    return null;
+  }
+  return provider;
+}
+
+/**
+ * A provider's subscription handshake.
  *
  * Meta calls this once when the webhook is registered and expects the challenge
- * echoed back as plain text. Anything else — wrong token, wrong mode — answers
- * 403 with no detail, because this endpoint is public.
+ * echoed back as plain text. Anything else — wrong token, wrong mode, a
+ * provider that does not verify — answers 403 with no detail.
  */
-export function verifyFacebookWebhookHandler(req: Request, res: Response): void {
+export function verifyWebhookHandler(req: Request, res: Response): void {
+  const provider = resolveProvider(req, res);
+  if (!provider) return;
+
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  const answer = facebookProvider.verifySubscription(
-    typeof mode === 'string' ? mode : undefined,
-    typeof token === 'string' ? token : undefined,
-    typeof challenge === 'string' ? challenge : undefined,
-  );
+  const answer =
+    provider.verifySubscription?.(
+      typeof mode === 'string' ? mode : undefined,
+      typeof token === 'string' ? token : undefined,
+      typeof challenge === 'string' ? challenge : undefined,
+    ) ?? null;
 
   if (answer === null) {
-    logger.warn({ mode }, 'Rejected a Facebook webhook verification attempt');
+    logger.warn({ mode, channel: provider.channel }, 'Rejected a webhook verification attempt');
     res.status(403).send('Forbidden');
     return;
   }
@@ -31,31 +64,32 @@ export function verifyFacebookWebhookHandler(req: Request, res: Response): void 
 }
 
 /**
- * Inbound Messenger events.
+ * Inbound provider events.
  *
  * The order is deliberate: verify the signature over the raw bytes, acknowledge
  * immediately, then process. Meta retries anything it does not see acknowledged
  * within seconds, so doing the database work first turns one slow query into a
  * redelivery storm. The work still runs — it is just not on the response path.
  */
-export function receiveFacebookWebhookHandler(req: Request, res: Response): void {
+export function receiveWebhookHandler(req: Request, res: Response): void {
+  const provider = resolveProvider(req, res);
+  if (!provider) return;
+
+  const slug = provider.channel.toLowerCase();
   const rawBody = req.rawBody;
 
   if (!rawBody) {
     // The body parser only captures raw bytes for /api/webhooks/*. Reaching
     // here means the route moved without the parser being told.
-    logger.error('Facebook webhook received without a raw body; signature cannot be verified');
+    logger.error({ slug }, 'Webhook received without a raw body; signature cannot be verified');
     res.status(400).send('Bad Request');
     return;
   }
 
-  const verified = facebookProvider.verifyWebhookSignature({
-    rawBody,
-    headers: req.headers,
-  });
+  const verified = provider.verifyWebhookSignature({ rawBody, headers: req.headers });
 
   if (!verified) {
-    logger.warn({ ip: req.ip }, 'Rejected a Facebook webhook with an invalid signature');
+    logger.warn({ ip: req.ip, slug }, 'Rejected a webhook with an invalid signature');
     res.status(401).send('Unauthorized');
     return;
   }
@@ -68,15 +102,15 @@ export function receiveFacebookWebhookHandler(req: Request, res: Response): void
 
   void (async () => {
     const webhookEventId = await recordWebhookDelivery({
-      provider: 'facebook',
+      provider: slug,
       eventType: typeof object === 'string' ? object : 'unknown',
       payload,
     });
 
-    const result = await handleProviderDelivery(facebookProvider, payload, webhookEventId);
+    const result = await handleProviderDelivery(provider, payload, webhookEventId);
 
     if (result.received > 0 || result.failed > 0) {
-      logger.info({ ...result, provider: 'facebook' }, 'Processed a Facebook webhook delivery');
+      logger.info({ ...result, provider: slug }, 'Processed a webhook delivery');
     }
   })();
 }

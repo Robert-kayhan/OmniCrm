@@ -172,6 +172,17 @@ export interface MessagingProvider {
   /** Rejects forged webhook deliveries. Providers without signing return true. */
   verifyWebhookSignature(input: WebhookSignatureInput): boolean;
 
+  /**
+   * Answers a provider's subscription handshake with the challenge to echo
+   * back, or null to refuse. Optional: only providers that Meta-style verify
+   * their callback URL implement it, and a provider without one answers 403.
+   */
+  verifySubscription?(
+    mode: string | undefined,
+    token: string | undefined,
+    challenge: string | undefined,
+  ): string | null;
+
   /** Enriches a bare provider id with a name/avatar, when the API allows it. */
   fetchContactProfile?(input: FetchProfileInput): Promise<Partial<NormalizedContact>>;
 }

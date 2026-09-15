@@ -4,7 +4,7 @@ import { logger } from '../../config/logger';
 import { getRedis, isRedisEnabled } from '../../database/redis';
 import { decryptSecret, encryptSecret, safeEqual } from '../../utils/crypto';
 import { UnauthorizedError } from '../../utils/errors';
-import type { MetaManagedPage } from '../../channels/facebook/facebook.oauth';
+import type { MetaManagedPage } from '../../channels/meta/meta.oauth';
 
 /**
  * The two pieces of short-lived state the OAuth flow needs.

@@ -3,9 +3,13 @@
 A multi-tenant CRM that centralises customer conversations from Facebook
 Messenger, Instagram, email, website chat and WhatsApp into a single inbox.
 
-Facebook Messenger is the first integration. Every other channel plugs into the
-same conversation system through a provider interface, so adding one is a new
-file rather than a schema change.
+Facebook Messenger and Instagram Direct are implemented. Every other channel
+plugs into the same conversation system through a provider interface, so adding
+one is a new file rather than a schema change — Instagram went in exactly that
+way, and the conversation system did not move.
+
+Both Meta channels share one app, one login and one set of credentials. See
+[docs/META_SETUP.md](docs/META_SETUP.md) to connect them.
 
 ---
 
@@ -42,7 +46,10 @@ crm-portal/
 ├── backend/
 │   ├── src/
 │   │   ├── channels/          provider contract + registry (the abstraction)
-│   │   │   └── facebook/      the first concrete provider
+│   │   │   ├── meta/          OAuth, webhook auth and wire types shared by
+│   │   │   │                  Messenger and Instagram
+│   │   │   ├── facebook/      Messenger provider
+│   │   │   └── instagram/     Instagram Direct provider
 │   │   ├── config/            env validation, logger, permissions
 │   │   ├── database/          Prisma and Redis clients
 │   │   ├── middleware/        auth, RBAC, validation, errors, rate limiting

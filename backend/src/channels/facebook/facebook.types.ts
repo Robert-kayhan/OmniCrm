@@ -7,67 +7,21 @@
  * rather than trusting a declared type.
  */
 
-export interface MetaError {
-  message?: string;
-  type?: string;
-  code?: number;
-  error_subcode?: number;
-  fbtrace_id?: string;
-}
-
-export interface MetaAttachmentPayload {
-  url?: string;
-  sticker_id?: number;
-  title?: string;
-  coordinates?: { lat?: number; long?: number };
-}
-
-export interface MetaAttachment {
-  type?: string;
-  payload?: MetaAttachmentPayload;
-}
-
-export interface MetaMessage {
-  mid?: string;
-  text?: string;
-  /** True when Meta is echoing a message the Page sent, including our own. */
-  is_echo?: boolean;
-  /** Present on echoes of Send API calls; identifies the app that sent it. */
-  app_id?: number | string;
-  metadata?: string;
-  attachments?: MetaAttachment[];
-  quick_reply?: { payload?: string };
-  reply_to?: { mid?: string };
-}
-
-export interface MetaMessagingEvent {
-  sender?: { id?: string };
-  recipient?: { id?: string };
-  timestamp?: number;
-  message?: MetaMessage;
-  delivery?: { mids?: string[]; watermark?: number };
-  read?: { watermark?: number };
-  postback?: { mid?: string; title?: string; payload?: string };
-}
-
-export interface MetaEntry {
-  /** The Page id. This is what resolves the delivery to a tenant. */
-  id?: string;
-  time?: number;
-  messaging?: MetaMessagingEvent[];
-}
-
-export interface MetaWebhookBody {
-  /** `page` for Messenger, `instagram` for IG Direct. */
-  object?: string;
-  entry?: MetaEntry[];
-}
-
-export interface MetaSendResponse {
-  recipient_id?: string;
-  message_id?: string;
-  error?: MetaError;
-}
+// The wire format itself is shared with Instagram Direct, which Meta delivers
+// through the same envelope. Re-exported here so the Messenger provider reads
+// from one obvious place.
+export type {
+  MetaAttachment,
+  MetaAttachmentPayload,
+  MetaEntry,
+  MetaError,
+  MetaGraphError,
+  MetaMessage,
+  MetaMessagingEvent,
+  MetaSendResponse,
+  MetaWebhookBody,
+} from '../meta/meta.types';
+import type { MetaError } from '../meta/meta.types';
 
 export interface MetaProfileResponse {
   id?: string;
@@ -76,15 +30,5 @@ export interface MetaProfileResponse {
   name?: string;
   profile_pic?: string;
   locale?: string;
-  error?: MetaError;
-}
-
-/**
- * The error envelope shared by every Graph response.
- *
- * Meta returns this alongside a 200 as readily as with a 4xx, so the OAuth
- * client checks for it regardless of status.
- */
-export interface MetaGraphError {
   error?: MetaError;
 }

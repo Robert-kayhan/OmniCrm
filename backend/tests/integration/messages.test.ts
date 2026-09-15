@@ -49,28 +49,31 @@ describe('POST /api/conversations/:id/messages', () => {
     const { admin, organization } = await createWorkspace();
     const customer = await createCustomer(organization.id);
 
+    // WhatsApp deliberately: it is a channel the product knows about but has
+    // no provider for. Facebook and Instagram would both reach a real provider
+    // and fail later, on the missing token, which is a different error.
     const integration = await prisma.integration.create({
       data: {
         organizationId: organization.id,
-        type: IntegrationType.FACEBOOK,
-        name: 'Test Page',
+        type: IntegrationType.WHATSAPP,
+        name: 'Test WhatsApp',
         status: 'CONNECTED',
-        externalPageId: `page-${Date.now()}`,
+        externalPageId: `wa-${Date.now()}`,
       },
     });
     const customerChannel = await prisma.customerChannel.create({
       data: {
         customerId: customer.id,
         integrationId: integration.id,
-        channel: Channel.FACEBOOK,
-        externalUserId: 'psid-1',
+        channel: Channel.WHATSAPP,
+        externalUserId: 'wa-1',
       },
     });
     const conversation = await prisma.conversation.create({
       data: {
         organizationId: organization.id,
         customerId: customer.id,
-        channel: Channel.FACEBOOK,
+        channel: Channel.WHATSAPP,
         integrationId: integration.id,
         customerChannelId: customerChannel.id,
       },

@@ -109,14 +109,23 @@ const envSchema = z.object({
   // refuse to boot rather than fall back to the default below.
   META_OAUTH_REDIRECT_URI: blankAsUndefined(z.url()),
 
-  // Permissions requested during Facebook Login. `pages_show_list` lists the
-  // Pages the operator admins, `pages_messaging` sends and receives, and
-  // `pages_manage_metadata` is what allows subscribing the Page to this app's
-  // webhook — without it a connect succeeds but no message ever arrives.
+  // Permissions requested during Facebook Login, covering both Meta inboxes.
+  //
+  //   pages_show_list            lists the Pages the operator admins
+  //   pages_messaging            sends and receives on Messenger
+  //   pages_read_engagement      reads Page content and conversation history
+  //   pages_manage_metadata      subscribes the Page to this app's webhook —
+  //                              without it a connect succeeds but no message
+  //                              ever arrives, on either channel
+  //   instagram_basic            reads the Instagram account linked to a Page
+  //   instagram_manage_messages  sends and receives on Instagram Direct
+  //
+  // Instagram needs the pages_* scopes too: its credential is the Page token,
+  // and its webhook subscription is the Page's.
   META_OAUTH_SCOPES: z
     .string()
     .default(
-      'pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,business_management',
+      'pages_show_list,pages_messaging,pages_read_engagement,pages_manage_metadata,instagram_basic,instagram_manage_messages,business_management',
     ),
 });
 

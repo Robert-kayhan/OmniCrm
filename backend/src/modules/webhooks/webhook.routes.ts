@@ -1,9 +1,6 @@
 import { Router } from 'express';
 import { webhookRateLimiter } from '../../middleware/rate-limit';
-import {
-  receiveFacebookWebhookHandler,
-  verifyFacebookWebhookHandler,
-} from './webhook.controller';
+import { receiveWebhookHandler, verifyWebhookHandler } from './webhook.controller';
 
 /**
  * Public provider callbacks.
@@ -13,10 +10,14 @@ import {
  * before the payload is looked at. The limiter here is generous rather than
  * absent — a burst of real traffic must get through, but an unauthenticated
  * public endpoint should not be an unbounded write path either.
+ *
+ * The `:provider` segment is the channel slug — `facebook`, `instagram` — and
+ * resolves through the channel registry, so adding a channel adds a webhook
+ * without touching this file.
  */
 export const webhookRouter = Router();
 
 webhookRouter.use(webhookRateLimiter());
 
-webhookRouter.get('/facebook', verifyFacebookWebhookHandler);
-webhookRouter.post('/facebook', receiveFacebookWebhookHandler);
+webhookRouter.get('/:provider', verifyWebhookHandler);
+webhookRouter.post('/:provider', receiveWebhookHandler);

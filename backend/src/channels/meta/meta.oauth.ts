@@ -1,7 +1,7 @@
 import { env, metaOAuthRedirectUri } from '../../config/env';
 import { logger } from '../../config/logger';
 import { IntegrationConfigurationError, ProviderError } from '../../utils/errors';
-import type { MetaGraphError } from './facebook.types';
+import type { MetaGraphError } from './meta.types';
 
 /**
  * Facebook Login, the Graph half.
@@ -28,6 +28,26 @@ const REQUEST_TIMEOUT_MS = 15_000;
 /** Meta's OAuth dialog lives on www.facebook.com, not graph.facebook.com. */
 const OAUTH_DIALOG_BASE = 'https://www.facebook.com';
 
+/** Which of a Page's two inboxes an operation addresses. */
+export type MetaPlatform = 'messenger' | 'instagram';
+
+/**
+ * The Instagram Professional account attached to a Page.
+ *
+ * Instagram Direct has no credential of its own: the Page token is what
+ * authorises reading and sending, and the Page is what carries the webhook
+ * subscription. An Instagram account is therefore always reached *through*
+ * the Page it is linked to, which is why this hangs off MetaManagedPage rather
+ * than standing alone.
+ */
+export interface MetaInstagramAccount {
+  /** The IG Professional account id. This is the inbox id webhooks arrive for. */
+  id: string;
+  username: string | null;
+  name: string | null;
+  pictureUrl: string | null;
+}
+
 export interface MetaManagedPage {
   id: string;
   name: string;
@@ -37,6 +57,8 @@ export interface MetaManagedPage {
   pictureUrl: string | null;
   /** True once this Page is delivering messages to this app's webhook. */
   alreadySubscribed: boolean;
+  /** Present only when a Professional Instagram account is linked to the Page. */
+  instagram: MetaInstagramAccount | null;
 }
 
 export interface MetaThreadMessage {
@@ -199,7 +221,12 @@ export async function listManagedPages(userAccessToken: string): Promise<MetaMan
   assertOAuthConfigured();
 
   const params = new URLSearchParams({
-    fields: 'id,name,access_token,category,picture{url},is_webhooks_subscribed',
+    // `instagram_business_account` is null for a Page with no linked
+    // Professional account, which is how the picker knows whether to offer
+    // Instagram for that Page at all.
+    fields:
+      'id,name,access_token,category,picture{url},is_webhooks_subscribed,' +
+      'instagram_business_account{id,username,name,profile_picture_url}',
     limit: '100',
     access_token: userAccessToken,
   });
@@ -212,6 +239,12 @@ export async function listManagedPages(userAccessToken: string): Promise<MetaMan
       category?: string;
       picture?: { data?: { url?: string } };
       is_webhooks_subscribed?: boolean;
+      instagram_business_account?: {
+        id?: string;
+        username?: string;
+        name?: string;
+        profile_picture_url?: string;
+      };
     }>;
   }>(`${graphBase()}/me/accounts?${params.toString()}`, { method: 'GET' }, 'page list');
 
@@ -220,6 +253,8 @@ export async function listManagedPages(userAccessToken: string): Promise<MetaMan
     // A Page without a token cannot be connected; showing it would produce a
     // picker entry that fails on click.
     if (!row?.id || !row.access_token) continue;
+    const ig = row.instagram_business_account;
+
     pages.push({
       id: row.id,
       name: row.name ?? `Page ${row.id}`,
@@ -227,6 +262,14 @@ export async function listManagedPages(userAccessToken: string): Promise<MetaMan
       category: row.category ?? null,
       pictureUrl: row.picture?.data?.url ?? null,
       alreadySubscribed: Boolean(row.is_webhooks_subscribed),
+      instagram: ig?.id
+        ? {
+            id: ig.id,
+            username: ig.username ?? null,
+            name: ig.name ?? null,
+            pictureUrl: ig.profile_picture_url ?? null,
+          }
+        : null,
     });
   }
   return pages;
@@ -291,24 +334,45 @@ export async function unsubscribePageFromApp(
  * The nested `messages{...}` expansion returns each thread's most recent
  * messages newest-first, which is why the caller reverses before ingesting.
  */
+export interface FetchConversationsInput {
+  /**
+   * Always a Facebook Page id, even for Instagram: the conversations edge
+   * hangs off the Page, and `platform` selects which inbox it reports.
+   */
+  pageId: string;
+  accessToken: string;
+  platform: MetaPlatform;
+  /**
+   * The ids that identify the business side of a thread — the Page id, and the
+   * linked Instagram account id when there is one. Whichever participant is not
+   * in this set is the customer.
+   */
+  selfIds: string[];
+  threadLimit: number;
+  messageLimit: number;
+}
+
 export async function fetchRecentConversations(
-  pageId: string,
-  pageAccessToken: string,
-  options: { threadLimit: number; messageLimit: number },
+  options: FetchConversationsInput,
 ): Promise<MetaThread[]> {
   assertOAuthConfigured();
 
+  const { pageId, accessToken, platform, selfIds } = options;
+
   const params = new URLSearchParams({
-    fields: `participants,updated_time,messages.limit(${options.messageLimit}){id,message,created_time,from,attachments{mime_type,name,image_data,file_url}}`,
+    fields: `participants{id,name,username},updated_time,messages.limit(${options.messageLimit}){id,message,created_time,from,attachments{mime_type,name,image_data,file_url}}`,
     limit: String(options.threadLimit),
-    access_token: pageAccessToken,
+    access_token: accessToken,
+    // Omitted for Messenger, where it is the default; required for Instagram,
+    // which otherwise returns the Page's Facebook threads instead.
+    ...(platform === 'instagram' ? { platform: 'instagram' } : {}),
   });
 
   const result = await graphFetch<{
     data?: Array<{
       id?: string;
       updated_time?: string;
-      participants?: { data?: Array<{ id?: string; name?: string; email?: string }> };
+      participants?: { data?: Array<{ id?: string; name?: string; username?: string; email?: string }> };
       messages?: {
         data?: Array<{
           id?: string;
@@ -333,11 +397,13 @@ export async function fetchRecentConversations(
   for (const row of result.data ?? []) {
     if (!row?.id) continue;
 
-    // The participant list holds both sides. The one that is not the Page is
-    // the customer; a thread with no such participant is the Page talking to
-    // itself and has no one to attribute messages to.
+    // The participant list holds both sides. Whichever participant is not the
+    // business is the customer; a thread with no such participant is the
+    // business talking to itself and has no one to attribute messages to.
     const participants = row.participants?.data ?? [];
-    const customer = participants.find((participant) => participant?.id && participant.id !== pageId);
+    const customer = participants.find(
+      (participant) => participant?.id && !selfIds.includes(participant.id),
+    );
 
     const messages: MetaThreadMessage[] = [];
     for (const message of row.messages?.data ?? []) {
@@ -367,12 +433,13 @@ export async function fetchRecentConversations(
     threads.push({
       id: row.id,
       participantId: customer?.id ?? null,
-      participantName: customer?.name ?? null,
+      // Instagram reports `username`; Messenger reports `name`.
+      participantName: customer?.name ?? customer?.username ?? null,
       updatedTime: row.updated_time ?? null,
       messages,
     });
   }
 
-  logger.debug({ pageId, threads: threads.length }, 'Fetched Facebook conversation history');
+  logger.debug({ pageId, platform, threads: threads.length }, 'Fetched Meta conversation history');
   return threads;
 }
