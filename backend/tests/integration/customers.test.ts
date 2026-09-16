@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { api, createCustomer, createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { api, createCustomer, createWorkspace, db } from '../helpers/factories';
 
 describe('POST /api/customers', () => {
   it('creates a customer scoped to the caller organization', async () => {
@@ -128,7 +127,7 @@ describe('DELETE /api/customers/:id', () => {
   it('removes the customer and cascades its conversations', async () => {
     const { admin, manager, organization } = await createWorkspace();
     const customer = await createCustomer(organization.id);
-    await prisma.conversation.create({
+    await db().conversation.create({
       data: { organizationId: organization.id, customerId: customer.id, channel: 'WEBSITE' },
     });
 
@@ -138,8 +137,8 @@ describe('DELETE /api/customers/:id', () => {
       .set('Authorization', manager.auth)
       .expect(204);
 
-    expect(await prisma.customer.findUnique({ where: { id: customer.id } })).toBeNull();
-    expect(await prisma.conversation.count({ where: { customerId: customer.id } })).toBe(0);
+    expect(await db().customer.findUnique({ where: { id: customer.id } })).toBeNull();
+    expect(await db().conversation.count({ where: { customerId: customer.id } })).toBe(0);
     void admin;
   });
 });

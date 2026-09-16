@@ -1,28 +1,11 @@
 /**
- * The single place channels are wired in.
+ * The channel abstraction's public surface.
  *
- * Adding a channel is: implement the provider, import it here, register it with
- * `registerProvider`. No other file changes — Instagram went in exactly that
- * way, and the conversation system did not move.
+ * Nothing outside this folder may import a concrete provider: resolve one
+ * through `ChannelRegistryService` so an unimplemented channel fails with a
+ * clear 503 instead of a crash, and so adding a channel touches one file.
  */
-import { logger } from '../config/logger';
-import { facebookProvider } from './facebook/facebook.provider';
-import { instagramProvider } from './instagram/instagram.provider';
-import { registerProvider, registeredChannels } from './registry';
-
 export * from './types';
 export * from './registry';
-
-export function registerChannelProviders(): void {
-  registerProvider(facebookProvider);
-  registerProvider(instagramProvider);
-
-  logger.info(
-    {
-      channels: registeredChannels(),
-      // Both read the same three Meta variables, so they report together.
-      meta: facebookProvider.isConfigured() ? 'configured' : 'credentials missing',
-    },
-    'Channel providers registered',
-  );
-}
+export * from './channel-registry.service';
+export * from './channel.module';

@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { api, createCustomer, createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { api, createCustomer, createWorkspace, db } from '../helpers/factories';
 import { Channel, NotificationType } from '../../src/generated/prisma/enums';
 
 async function seedConversation(organizationId: string) {
   const customer = await createCustomer(organizationId);
-  return prisma.conversation.create({
+  return db().conversation.create({
     data: { organizationId, customerId: customer.id, channel: Channel.WEBSITE },
   });
 }
@@ -23,7 +22,7 @@ describe('POST /api/conversations/:id/assign', () => {
 
     expect(response.body.data.assignedUser.id).toBe(agent.userId);
 
-    const history = await prisma.conversationAssignment.findMany({
+    const history = await db().conversationAssignment.findMany({
       where: { conversationId: conversation.id },
     });
     expect(history).toHaveLength(1);
@@ -50,7 +49,7 @@ describe('POST /api/conversations/:id/assign', () => {
       .send({ assignedUserId: otherAgent.userId })
       .expect(200);
 
-    const history = await prisma.conversationAssignment.findMany({
+    const history = await db().conversationAssignment.findMany({
       where: { conversationId: conversation.id },
       orderBy: { assignedAt: 'asc' },
     });
@@ -72,11 +71,11 @@ describe('POST /api/conversations/:id/assign', () => {
       .send({ assignedUserId: agent.userId })
       .expect(200);
 
-    const forAgent = await prisma.notification.findMany({ where: { userId: agent.userId } });
+    const forAgent = await db().notification.findMany({ where: { userId: agent.userId } });
     expect(forAgent).toHaveLength(1);
     expect(forAgent[0]?.type).toBe(NotificationType.CONVERSATION_ASSIGNED);
 
-    expect(await prisma.notification.count({ where: { userId: manager.userId } })).toBe(0);
+    expect(await db().notification.count({ where: { userId: manager.userId } })).toBe(0);
   });
 
   it('marks a later change as a reassignment', async () => {
@@ -94,7 +93,7 @@ describe('POST /api/conversations/:id/assign', () => {
       .send({ assignedUserId: otherAgent.userId })
       .expect(200);
 
-    const notification = await prisma.notification.findFirst({
+    const notification = await db().notification.findFirst({
       where: { userId: otherAgent.userId },
     });
     expect(notification?.type).toBe(NotificationType.CONVERSATION_REASSIGNED);
@@ -119,7 +118,7 @@ describe('POST /api/conversations/:id/assign', () => {
     expect(response.body.data.assignedUser).toBeNull();
 
     // The closed period remains; no new open one is created.
-    const open = await prisma.conversationAssignment.findMany({
+    const open = await db().conversationAssignment.findMany({
       where: { conversationId: conversation.id, unassignedAt: null },
     });
     expect(open).toHaveLength(0);

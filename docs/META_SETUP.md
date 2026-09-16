@@ -236,7 +236,7 @@ FRONTEND_URL=https://app.yourdomain.com
 # Optional: only needed if something other than FRONTEND_URL calls the API.
 CORS_ORIGINS=
 
-# One reverse proxy in front of the API. Without this, express sees the
+# One reverse proxy in front of the API. Without this, the API sees the
 # proxy's IP for every request, so rate limiting buckets the whole internet
 # together and the login limiter locks everyone out at once.
 TRUST_PROXY_HOPS=1

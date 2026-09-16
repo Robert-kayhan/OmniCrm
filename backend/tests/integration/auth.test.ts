@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { api, createActor, createOrganization, TEST_PASSWORD } from '../helpers/factories';
+import { api, createActor, createOrganization, db, testApp, TEST_PASSWORD } from '../helpers/factories';
 import { UserRole, UserStatus } from '../../src/generated/prisma/enums';
-import { prisma } from '../../src/database/prisma';
-import { hashPassword } from '../../src/utils/password';
+import { PasswordService } from '../../src/common/crypto/password.service';
 
 describe('POST /api/auth/login', () => {
   it('issues an access token for valid credentials', async () => {
@@ -45,12 +44,12 @@ describe('POST /api/auth/login', () => {
 
   it('refuses a user who has been invited but not activated', async () => {
     const organization = await createOrganization();
-    await prisma.user.create({
+    await db().user.create({
       data: {
         organizationId: organization.id,
         name: 'Invited',
         email: 'invited@test.local',
-        password: await hashPassword(TEST_PASSWORD),
+        password: await testApp().get(PasswordService).hash(TEST_PASSWORD),
         role: UserRole.AGENT,
         status: UserStatus.INVITED,
       },

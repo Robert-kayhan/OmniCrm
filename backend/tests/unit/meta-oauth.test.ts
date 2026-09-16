@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { createState, readState } from '../../src/modules/integrations/meta-oauth.store';
+import { MetaOAuthStore } from '../../src/modules/integrations/meta-oauth.store';
+import { CryptoService } from '../../src/common/crypto/crypto.service';
+import { AppConfigService } from '../../src/config/app-config.service';
+import { RedisService } from '../../src/database/redis.service';
 import { toNormalizedMessages } from '../../src/modules/integrations/meta-import.service';
 import type { MetaThread } from '../../src/channels/meta/meta.oauth';
+
+/**
+ * Constructed directly rather than through the container. `state` is a pure
+ * HMAC over the operator's identity — it needs configuration and the crypto
+ * helper and nothing else, so the unit suite stays free of a database and a
+ * Redis connection. The handoff half, which does use Redis, is covered by the
+ * integration suite.
+ */
+const config = new AppConfigService();
+const store = new MetaOAuthStore(config, new CryptoService(config), new RedisService(config));
 
 /**
  * The two pieces of the connect flow that can be tested without Meta.
@@ -17,14 +30,14 @@ const USER = 'user_456';
 
 describe('facebook oauth state', () => {
   it('round-trips the operator identity', () => {
-    const payload = readState(createState(ORG, USER));
+    const payload = store.readState(store.createState(ORG, USER));
 
     expect(payload.organizationId).toBe(ORG);
     expect(payload.userId).toBe(USER);
   });
 
   it('rejects a state with a tampered body', () => {
-    const [body, signature] = createState(ORG, USER).split('.');
+    const [body, signature] = store.createState(ORG, USER).split('.');
     const forged = Buffer.from(
       JSON.stringify({
         organizationId: 'someone_elses_org',
@@ -37,18 +50,18 @@ describe('facebook oauth state', () => {
     expect(body).toBeDefined();
     // The signature still belongs to the original body, so swapping the
     // payload must not authenticate a different workspace.
-    expect(() => readState(`${forged}.${signature}`)).toThrow();
+    expect(() => store.readState(`${forged}.${signature}`)).toThrow();
   });
 
   it('rejects a state with a tampered signature', () => {
-    const [body] = createState(ORG, USER).split('.');
-    expect(() => readState(`${body}.not-the-real-signature`)).toThrow();
+    const [body] = store.createState(ORG, USER).split('.');
+    expect(() => store.readState(`${body}.not-the-real-signature`)).toThrow();
   });
 
   it('rejects a malformed or absent state', () => {
-    expect(() => readState(undefined)).toThrow();
-    expect(() => readState('')).toThrow();
-    expect(() => readState('no-dot-separator')).toThrow();
+    expect(() => store.readState(undefined)).toThrow();
+    expect(() => store.readState('')).toThrow();
+    expect(() => store.readState('no-dot-separator')).toThrow();
   });
 
   it('rejects an expired state', () => {
@@ -63,12 +76,12 @@ describe('facebook oauth state', () => {
       }),
     ).toString('base64url');
 
-    expect(() => readState(`${expired}.anything`)).toThrow();
+    expect(() => store.readState(`${expired}.anything`)).toThrow();
   });
 
   it('issues a different state each time', () => {
     // The nonce is what stops a captured login URL being replayed verbatim.
-    expect(createState(ORG, USER)).not.toBe(createState(ORG, USER));
+    expect(store.createState(ORG, USER)).not.toBe(store.createState(ORG, USER));
   });
 });
 

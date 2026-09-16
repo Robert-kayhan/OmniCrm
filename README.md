@@ -50,15 +50,17 @@ crm-portal/
 │   │   │   │                  Messenger and Instagram
 │   │   │   ├── facebook/      Messenger provider
 │   │   │   └── instagram/     Instagram Direct provider
+│   │   ├── common/            the cross-cutting layer, applied globally:
+│   │   │                      guards (auth, RBAC), validation pipe, response
+│   │   │                      envelope, exception filter, throttling, DTO
+│   │   │                      helpers, crypto and token services
 │   │   ├── config/            env validation, logger, permissions
-│   │   ├── database/          Prisma and Redis clients
-│   │   ├── middleware/        auth, RBAC, validation, errors, rate limiting
-│   │   ├── modules/           one folder per domain (see below)
-│   │   ├── realtime/          Socket.IO server, rooms and emit helpers
-│   │   ├── routes/            single API mount point
-│   │   ├── utils/             errors, crypto, jwt, pagination, responses
-│   │   ├── app.ts
-│   │   └── server.ts
+│   │   ├── database/          Prisma and Redis providers
+│   │   ├── health/            liveness and readiness probes
+│   │   ├── modules/           one Nest module per domain (see below)
+│   │   ├── realtime/          Socket.IO gateway, rooms and emit helpers
+│   │   ├── app.module.ts      composition root
+│   │   └── main.ts            bootstrap
 │   ├── prisma/                schema, migrations, seed
 │   └── tests/                 unit + integration suites
 ├── frontend/
@@ -139,6 +141,13 @@ pnpm db:seed          # demo organization, users, teams, conversations
 cd backend  && pnpm dev     # http://localhost:4000
 cd frontend && pnpm dev     # http://localhost:3000
 ```
+
+Interactive API documentation is at **http://localhost:4000/api/docs**, and the
+OpenAPI 3 document itself at `/api/docs-json` — point Postman, Insomnia or a
+client generator at that URL. Sign in through `POST /api/auth/login`, paste the
+`accessToken` into **Authorize**, and every protected route is callable from the
+page. Docs are withheld when `NODE_ENV=production` unless `ENABLE_API_DOCS=true`,
+since the document maps the whole attack surface.
 
 ### Demo accounts
 

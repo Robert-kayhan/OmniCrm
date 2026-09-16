@@ -1,5 +1,5 @@
 import { Channel, IntegrationType } from '../generated/prisma/enums';
-import { IntegrationConfigurationError } from '../utils/errors';
+import { IntegrationConfigurationError } from '../common/errors/app.error';
 import type { MessagingProvider } from './types';
 
 /**

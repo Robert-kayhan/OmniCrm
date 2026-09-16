@@ -85,6 +85,15 @@ const envSchema = z.object({
   // --- Feature flags -----------------------------------------------------
   /** Enables /api/dev/* fixtures. Refused outright when NODE_ENV=production. */
   ENABLE_DEV_TOOLS: booleanish.default(false),
+  /**
+   * Serves the OpenAPI document and its browser UI at /api/docs.
+   *
+   * Left unset it follows NODE_ENV — on outside production, off inside — because
+   * the document enumerates every route, its permissions and its payloads,
+   * which is a map of the attack surface. Set it explicitly to publish docs
+   * from a production deployment anyway (an internal API behind a VPN, say).
+   */
+  ENABLE_API_DOCS: booleanish.optional(),
   /** When false, POST /api/auth/register is closed and users arrive by invite. */
   ALLOW_PUBLIC_REGISTRATION: booleanish.default(true),
 

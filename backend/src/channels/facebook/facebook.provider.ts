@@ -1,8 +1,8 @@
 import { env } from '../../config/env';
 import { verifyMetaSubscription, verifyMetaWebhookSignature } from '../meta/meta.webhook';
-import { logger } from '../../config/logger';
+import { Logger } from '@nestjs/common';
 import { Channel, IntegrationType, MessageType } from '../../generated/prisma/enums';
-import { IntegrationConfigurationError, ProviderError } from '../../utils/errors';
+import { IntegrationConfigurationError, ProviderError } from '../../common/errors/app.error';
 import type {
   FetchProfileInput,
   MessagingProvider,
@@ -25,6 +25,14 @@ import type {
   MetaSendResponse,
   MetaWebhookBody,
 } from './facebook.types';
+
+/**
+ * Providers are plain adapters rather than Nest providers — they hold no
+ * state and touch neither the database nor the container — so the logger is
+ * instantiated directly. Nest routes it through the same pino transport as
+ * everything else once the application logger is installed.
+ */
+const logger = new Logger('FacebookProvider');
 
 /** Meta drops a delivery that has not been answered quickly; fail before it does. */
 const REQUEST_TIMEOUT_MS = 10_000;

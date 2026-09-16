@@ -1,7 +1,7 @@
 import { env } from '../../config/env';
-import { logger } from '../../config/logger';
+import { Logger } from '@nestjs/common';
 import { Channel, IntegrationType, MessageType } from '../../generated/prisma/enums';
-import { IntegrationConfigurationError, ProviderError } from '../../utils/errors';
+import { IntegrationConfigurationError, ProviderError } from '../../common/errors/app.error';
 import { verifyMetaSubscription, verifyMetaWebhookSignature } from '../meta/meta.webhook';
 import type {
   MetaAttachment,
@@ -25,6 +25,14 @@ import type {
   WebhookSignatureInput,
 } from '../types';
 import type { InstagramProfileResponse } from './instagram.types';
+
+/**
+ * Providers are plain adapters rather than Nest providers — they hold no
+ * state and touch neither the database nor the container — so the logger is
+ * instantiated directly. Nest routes it through the same pino transport as
+ * everything else once the application logger is installed.
+ */
+const logger = new Logger('InstagramProvider');
 
 /**
  * Instagram Direct.

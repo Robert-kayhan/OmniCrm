@@ -1,71 +1,121 @@
-import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { body, params, query } from '../../middleware/validate';
-import { sendCreated, sendNoContent, sendSuccess } from '../../utils/response';
-import type { IdParam } from '../../utils/validation';
-import { auditContextFromRequest } from '../audit-logs/audit-log.service';
-import * as customerService from './customer.service';
-import type {
-  CreateCustomerInput,
-  CustomerTagParam,
-  CustomerTagsInput,
-  ListCustomersQuery,
-  UpdateCustomerInput,
-} from './customer.schema';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiNoContentResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiEnvelopeCreatedResponse,
+  ApiEnvelopeResponse,
+  ApiPaginatedResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { PERMISSIONS } from '../../config/permissions';
+import { CurrentUser, RequirePermissions } from '../../common/decorators/auth.decorators';
+import {
+  Client,
+  type ClientContext,
+} from '../../common/decorators/client-context.decorator';
+import { IdParamDto } from '../../common/dto/id-param.dto';
+import { withMeta } from '../../common/http/api-response';
+import type { AuthContext } from '../../types/auth';
+import { CustomerService } from './customer.service';
+import {
+  CreateCustomerDto,
+  CustomerTagParamDto,
+  CustomerTagsDto,
+  ListCustomersQueryDto,
+  UpdateCustomerDto,
+} from './dto/customer.dto';
 
-export async function listCustomersHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const result = await customerService.listCustomers(
-    auth.organizationId,
-    query<ListCustomersQuery>(req),
-  );
-  return sendSuccess(res, result.items, 200, result.meta);
-}
+@ApiTags('Customers')
+@ApiBearerAuth('bearer')
+@ApiStandardErrors()
+@Controller('customers')
+export class CustomerController {
+  constructor(private readonly customers: CustomerService) {}
 
-export async function getCustomerHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  return sendSuccess(res, await customerService.getCustomerById(auth.organizationId, id));
-}
+  @Get()
+  @ApiOperation({ summary: 'List customers' })
+  @ApiPaginatedResponse()
+  @RequirePermissions(PERMISSIONS.CUSTOMER_READ)
+  async list(@CurrentUser() auth: AuthContext, @Query() query: ListCustomersQueryDto) {
+    const result = await this.customers.list(auth.organizationId, query);
+    return withMeta(result.items, result.meta);
+  }
 
-export async function createCustomerHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const customer = await customerService.createCustomer(
-    auth,
-    body<CreateCustomerInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendCreated(res, customer);
-}
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a customer' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CUSTOMER_READ)
+  get(@CurrentUser() auth: AuthContext, @Param() { id }: IdParamDto) {
+    return this.customers.getById(auth.organizationId, id);
+  }
 
-export async function updateCustomerHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const customer = await customerService.updateCustomer(
-    auth,
-    id,
-    body<UpdateCustomerInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendSuccess(res, customer);
-}
+  @Post()
+  @ApiOperation({ summary: 'Create a customer' })
+  @ApiEnvelopeCreatedResponse()
+  @RequirePermissions(PERMISSIONS.CUSTOMER_CREATE)
+  @HttpCode(HttpStatus.CREATED)
+  create(
+    @CurrentUser() auth: AuthContext,
+    @Body() dto: CreateCustomerDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.customers.create(auth, dto, client);
+  }
 
-export async function deleteCustomerHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  await customerService.deleteCustomer(auth, id, auditContextFromRequest(req));
-  return sendNoContent(res);
-}
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update a customer' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CUSTOMER_UPDATE)
+  update(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: UpdateCustomerDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.customers.update(auth, id, dto, client);
+  }
 
-export async function addCustomerTagsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const customer = await customerService.addCustomerTags(auth, id, body<CustomerTagsInput>(req));
-  return sendSuccess(res, customer);
-}
+  @Delete(':id')
+  @ApiOperation({ summary: 'Delete a customer and everything attached to them' })
+  @ApiNoContentResponse({ description: 'Deleted.' })
+  @RequirePermissions(PERMISSIONS.CUSTOMER_DELETE)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Client() client: ClientContext,
+  ): Promise<void> {
+    await this.customers.remove(auth, id, client);
+  }
 
-export async function removeCustomerTagHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id, tagId } = params<CustomerTagParam>(req);
-  return sendSuccess(res, await customerService.removeCustomerTag(auth, id, tagId));
+  @Post(':id/tags')
+  @ApiOperation({ summary: 'Attach tags to a customer' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CUSTOMER_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  addTags(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: CustomerTagsDto,
+  ) {
+    return this.customers.addTags(auth, id, dto);
+  }
+
+  @Delete(':id/tags/:tagId')
+  @ApiOperation({ summary: 'Detach a tag from a customer' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CUSTOMER_UPDATE)
+  removeTag(@CurrentUser() auth: AuthContext, @Param() { id, tagId }: CustomerTagParamDto) {
+    return this.customers.removeTag(auth, id, tagId);
+  }
 }

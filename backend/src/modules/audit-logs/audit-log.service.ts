@@ -1,11 +1,10 @@
-import type { Request } from 'express';
+import { Injectable, Logger } from '@nestjs/common';
+import { buildPaginationMeta } from '../../common/http/api-response';
+import { toSkipTake } from '../../common/dto/pagination.dto';
+import { PrismaService, type Db } from '../../database/prisma.service';
 import type { Prisma } from '../../generated/prisma/client';
-import type { Db } from '../../database/prisma';
-import { prisma } from '../../database/prisma';
-import { logger } from '../../config/logger';
-import { buildPaginationMeta } from '../../utils/response';
-import { toSkipTake, type PageQuery } from '../../utils/pagination';
 import type { AuditAction, AuditEntity } from './audit-log.actions';
+import type { ListAuditLogsQueryDto } from './dto/list-audit-logs.dto';
 
 export interface AuditInput {
   organizationId: string;
@@ -58,83 +57,73 @@ function scrub(value: unknown, depth = 0): Prisma.InputJsonValue | undefined {
   return value as Prisma.InputJsonValue;
 }
 
-/**
- * Writes an audit row. Never throws: an audit failure must not roll back or
- * fail the business operation that triggered it (unless it is inside a caller
- * supplied transaction, where the caller has already accepted that coupling).
- */
-export async function recordAudit(input: AuditInput): Promise<void> {
-  const db = input.db ?? prisma;
-  try {
-    await db.auditLog.create({
-      data: {
-        organizationId: input.organizationId,
-        userId: input.userId ?? null,
-        action: input.action,
-        entityType: input.entityType,
-        entityId: input.entityId ?? null,
-        oldData: scrub(input.oldData),
-        newData: scrub(input.newData),
-        ipAddress: input.ipAddress ?? null,
-        userAgent: input.userAgent ?? null,
-      },
-    });
-  } catch (error) {
-    logger.error(
-      { err: error, action: input.action, organizationId: input.organizationId },
-      'Failed to write audit log',
-    );
+@Injectable()
+export class AuditLogService {
+  private readonly logger = new Logger(AuditLogService.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Writes an audit row. Never throws: an audit failure must not roll back or
+   * fail the business operation that triggered it (unless it is inside a caller
+   * supplied transaction, where the caller has already accepted that coupling).
+   */
+  async record(input: AuditInput): Promise<void> {
+    const db = input.db ?? this.prisma;
+    try {
+      await db.auditLog.create({
+        data: {
+          organizationId: input.organizationId,
+          userId: input.userId ?? null,
+          action: input.action,
+          entityType: input.entityType,
+          entityId: input.entityId ?? null,
+          oldData: scrub(input.oldData),
+          newData: scrub(input.newData),
+          ipAddress: input.ipAddress ?? null,
+          userAgent: input.userAgent ?? null,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        { err: error, action: input.action, organizationId: input.organizationId },
+        'Failed to write audit log',
+      );
+    }
   }
-}
 
-/** Pulls the client fingerprint used on every audit row. */
-export function auditContextFromRequest(req: Request): { ipAddress: string | null; userAgent: string | null } {
-  return {
-    ipAddress: req.ip ?? null,
-    userAgent: req.get('user-agent')?.slice(0, 512) ?? null,
-  };
-}
+  async list(organizationId: string, filters: ListAuditLogsQueryDto) {
+    const where: Prisma.AuditLogWhereInput = {
+      organizationId,
+      ...(filters.action ? { action: filters.action } : {}),
+      ...(filters.entityType ? { entityType: filters.entityType } : {}),
+      ...(filters.entityId ? { entityId: filters.entityId } : {}),
+      ...(filters.userId ? { userId: filters.userId } : {}),
+      ...(filters.from || filters.to
+        ? {
+            createdAt: {
+              ...(filters.from ? { gte: filters.from } : {}),
+              ...(filters.to ? { lte: filters.to } : {}),
+            },
+          }
+        : {}),
+    };
 
-export interface AuditLogFilters extends PageQuery {
-  action?: string;
-  entityType?: string;
-  entityId?: string;
-  userId?: string;
-  from?: Date;
-  to?: Date;
-}
+    const { skip, take } = toSkipTake(filters);
 
-export async function listAuditLogs(organizationId: string, filters: AuditLogFilters) {
-  const where: Prisma.AuditLogWhereInput = {
-    organizationId,
-    ...(filters.action ? { action: filters.action } : {}),
-    ...(filters.entityType ? { entityType: filters.entityType } : {}),
-    ...(filters.entityId ? { entityId: filters.entityId } : {}),
-    ...(filters.userId ? { userId: filters.userId } : {}),
-    ...(filters.from || filters.to
-      ? {
-          createdAt: {
-            ...(filters.from ? { gte: filters.from } : {}),
-            ...(filters.to ? { lte: filters.to } : {}),
-          },
-        }
-      : {}),
-  };
+    const [items, total] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          user: { select: { id: true, name: true, email: true, avatar: true } },
+        },
+      }),
+      this.prisma.auditLog.count({ where }),
+    ]);
 
-  const { skip, take } = toSkipTake(filters);
-
-  const [items, total] = await Promise.all([
-    prisma.auditLog.findMany({
-      where,
-      skip,
-      take,
-      orderBy: { createdAt: 'desc' },
-      include: {
-        user: { select: { id: true, name: true, email: true, avatar: true } },
-      },
-    }),
-    prisma.auditLog.count({ where }),
-  ]);
-
-  return { items, meta: buildPaginationMeta(filters.page, filters.limit, total) };
+    return { items, meta: buildPaginationMeta(filters.page, filters.limit, total) };
+  }
 }

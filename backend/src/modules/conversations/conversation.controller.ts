@@ -1,92 +1,143 @@
-import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { body, params, query } from '../../middleware/validate';
-import { sendCreated, sendSuccess } from '../../utils/response';
-import type { IdParam } from '../../utils/validation';
-import { auditContextFromRequest } from '../audit-logs/audit-log.service';
-import * as conversationService from './conversation.service';
-import type {
-  ConversationTagParam,
-  ConversationTagsInput,
-  CreateConversationInput,
-  ListConversationsQuery,
-  UpdatePriorityInput,
-  UpdateStatusInput,
-} from './conversation.schema';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiEnvelopeCreatedResponse,
+  ApiEnvelopeResponse,
+  ApiPaginatedResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { PERMISSIONS } from '../../config/permissions';
+import { CurrentUser, RequirePermissions } from '../../common/decorators/auth.decorators';
+import {
+  Client,
+  type ClientContext,
+} from '../../common/decorators/client-context.decorator';
+import { IdParamDto } from '../../common/dto/id-param.dto';
+import { withMeta } from '../../common/http/api-response';
+import type { AuthContext } from '../../types/auth';
+import { ConversationService } from './conversation.service';
+import {
+  ConversationTagParamDto,
+  ConversationTagsDto,
+  CreateConversationDto,
+  ListConversationsQueryDto,
+  UpdatePriorityDto,
+  UpdateStatusDto,
+} from './dto/conversation.dto';
 
-export async function listConversationsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const result = await conversationService.listConversations(
-    auth,
-    query<ListConversationsQuery>(req),
-  );
-  return sendSuccess(res, result.items, 200, result.meta);
-}
+@ApiTags('Conversations')
+@ApiBearerAuth('bearer')
+@ApiStandardErrors()
+@Controller('conversations')
+export class ConversationController {
+  constructor(private readonly conversations: ConversationService) {}
 
-export async function conversationStatsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  return sendSuccess(res, await conversationService.getConversationStats(auth));
-}
+  @Get()
+  @ApiOperation({ summary: 'List conversations in the inbox' })
+  @ApiPaginatedResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_READ)
+  async list(@CurrentUser() auth: AuthContext, @Query() query: ListConversationsQueryDto) {
+    const result = await this.conversations.list(auth, query);
+    return withMeta(result.items, result.meta);
+  }
 
-export async function getConversationHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  return sendSuccess(res, await conversationService.getConversationById(auth, id));
-}
+  /** Declared before `:id` so "stats" is not parsed as a conversation id. */
+  @Get('stats')
+  @ApiOperation({ summary: 'Conversation counters for the inbox header' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_READ)
+  stats(@CurrentUser() auth: AuthContext) {
+    return this.conversations.getStats(auth);
+  }
 
-export async function createConversationHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const conversation = await conversationService.createConversation(
-    auth,
-    body<CreateConversationInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendCreated(res, conversation);
-}
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a conversation' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_READ)
+  get(@CurrentUser() auth: AuthContext, @Param() { id }: IdParamDto) {
+    return this.conversations.getById(auth, id);
+  }
 
-export async function updateStatusHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const conversation = await conversationService.updateStatus(
-    auth,
-    id,
-    body<UpdateStatusInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendSuccess(res, conversation);
-}
+  @Post()
+  @ApiOperation({ summary: 'Open a conversation' })
+  @ApiEnvelopeCreatedResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_CREATE)
+  @HttpCode(HttpStatus.CREATED)
+  create(
+    @CurrentUser() auth: AuthContext,
+    @Body() dto: CreateConversationDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.conversations.create(auth, dto, client);
+  }
 
-export async function updatePriorityHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const conversation = await conversationService.updatePriority(
-    auth,
-    id,
-    body<UpdatePriorityInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendSuccess(res, conversation);
-}
+  @Patch(':id/status')
+  @ApiOperation({ summary: 'Change a conversation’s status' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_UPDATE)
+  updateStatus(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: UpdateStatusDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.conversations.updateStatus(auth, id, dto, client);
+  }
 
-export async function markReadHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  return sendSuccess(res, await conversationService.markConversationRead(auth, id));
-}
+  @Patch(':id/priority')
+  @ApiOperation({ summary: 'Change a conversation’s priority' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_UPDATE)
+  updatePriority(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: UpdatePriorityDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.conversations.updatePriority(auth, id, dto, client);
+  }
 
-export async function addTagsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const conversation = await conversationService.addConversationTags(
-    auth,
-    id,
-    body<ConversationTagsInput>(req),
-  );
-  return sendSuccess(res, conversation);
-}
+  @Post(':id/read')
+  @ApiOperation({ summary: 'Clear the unread badge and stamp read receipts' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_READ)
+  @HttpCode(HttpStatus.OK)
+  markRead(@CurrentUser() auth: AuthContext, @Param() { id }: IdParamDto) {
+    return this.conversations.markRead(auth, id);
+  }
 
-export async function removeTagHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id, tagId } = params<ConversationTagParam>(req);
-  return sendSuccess(res, await conversationService.removeConversationTag(auth, id, tagId));
+  @Post(':id/tags')
+  @ApiOperation({ summary: 'Attach tags to a conversation' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  addTags(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: ConversationTagsDto,
+  ) {
+    return this.conversations.addTags(auth, id, dto);
+  }
+
+  @Delete(':id/tags/:tagId')
+  @ApiOperation({ summary: 'Detach a tag from a conversation' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.CONVERSATION_UPDATE)
+  removeTag(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id, tagId }: ConversationTagParamDto,
+  ) {
+    return this.conversations.removeTag(auth, id, tagId);
+  }
 }

@@ -1,7 +1,15 @@
 import { env, metaOAuthRedirectUri } from '../../config/env';
-import { logger } from '../../config/logger';
-import { IntegrationConfigurationError, ProviderError } from '../../utils/errors';
+import { Logger } from '@nestjs/common';
+import { IntegrationConfigurationError, ProviderError } from '../../common/errors/app.error';
 import type { MetaGraphError } from './meta.types';
+
+/**
+ * Providers are plain adapters rather than Nest providers — they hold no
+ * state and touch neither the database nor the container — so the logger is
+ * instantiated directly. Nest routes it through the same pino transport as
+ * everything else once the application logger is installed.
+ */
+const logger = new Logger('MetaOAuth');
 
 /**
  * Facebook Login, the Graph half.

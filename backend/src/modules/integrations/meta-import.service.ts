@@ -1,14 +1,14 @@
-import { logger } from '../../config/logger';
-import { prisma } from '../../database/prisma';
-import { Channel, MessageType } from '../../generated/prisma/enums';
-import type { NormalizedAttachment, NormalizedMessage } from '../../channels';
+import { Injectable, Logger } from '@nestjs/common';
+import type { NormalizedAttachment, NormalizedMessage } from '../../channels/types';
 import {
   fetchRecentConversations,
   type MetaPlatform,
   type MetaThread,
 } from '../../channels/meta/meta.oauth';
+import { PrismaService } from '../../database/prisma.service';
+import { Channel, MessageType } from '../../generated/prisma/enums';
 import {
-  ingestNormalizedMessage,
+  ConversationIngestService,
   type ResolvedIntegration,
 } from '../conversations/conversation.ingest';
 
@@ -18,7 +18,7 @@ import {
  * Webhooks only deliver what arrives after the Page is subscribed, so a freshly
  * connected Page would otherwise show an empty inbox until a customer happened
  * to write in. This reads the recent history once, at connect time, and pushes
- * it through the same `ingestNormalizedMessage` path a webhook uses — so
+ * it through the same ingest path a webhook uses — so
  * threading, customer resolution and deduplication behave identically and no
  * import-specific write path exists to drift.
  *
@@ -147,63 +147,73 @@ export interface ImportHistoryInput {
   limits?: { threadLimit: number; messageLimit: number };
 }
 
-export async function importRecentHistory(input: ImportHistoryInput): Promise<ImportSummary> {
-  const { integration, pageId, inboxId, accessToken, channel } = input;
-  const limits = input.limits ?? DEFAULT_IMPORT_LIMITS;
-  const platform: MetaPlatform = channel === Channel.INSTAGRAM ? 'instagram' : 'messenger';
+@Injectable()
+export class MetaImportService {
+  private readonly logger = new Logger(MetaImportService.name);
 
-  // Both ids count as the business: a Messenger thread reports the Page as
-  // sender, an Instagram thread reports the IG account.
-  const selfIds = Array.from(new Set([pageId, inboxId]));
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly ingest: ConversationIngestService,
+  ) {}
 
-  const summary: ImportSummary = { threads: 0, messagesCreated: 0, duplicates: 0, failures: 0 };
+  async importRecentHistory(input: ImportHistoryInput): Promise<ImportSummary> {
+    const { integration, pageId, inboxId, accessToken, channel } = input;
+    const limits = input.limits ?? DEFAULT_IMPORT_LIMITS;
+    const platform: MetaPlatform = channel === Channel.INSTAGRAM ? 'instagram' : 'messenger';
 
-  let threads: MetaThread[];
-  try {
-    threads = await fetchRecentConversations({
-      pageId,
-      accessToken,
-      platform,
-      selfIds,
-      threadLimit: limits.threadLimit,
-      messageLimit: limits.messageLimit,
-    });
-  } catch (error) {
-    logger.warn(
-      { err: error, integrationId: integration.id, pageId, platform },
-      'Meta history import could not read conversations; live messages are unaffected',
-    );
-    summary.failures += 1;
-    return summary;
-  }
+    // Both ids count as the business: a Messenger thread reports the Page as
+    // sender, an Instagram thread reports the IG account.
+    const selfIds = Array.from(new Set([pageId, inboxId]));
 
-  summary.threads = threads.length;
+    const summary: ImportSummary = { threads: 0, messagesCreated: 0, duplicates: 0, failures: 0 };
 
-  for (const thread of threads) {
-    for (const normalized of toNormalizedMessages(thread, inboxId, channel, selfIds)) {
-      try {
-        const result = await ingestNormalizedMessage(integration, normalized);
-        if (result.created) summary.messagesCreated += 1;
-        else summary.duplicates += 1;
-      } catch (error) {
-        // One malformed thread must not abandon the rest of the import.
-        summary.failures += 1;
-        logger.warn(
-          { err: error, integrationId: integration.id, externalMessageId: normalized.externalMessageId },
-          'Skipping a message that failed to import',
-        );
+    let threads: MetaThread[];
+    try {
+      threads = await fetchRecentConversations({
+        pageId,
+        accessToken,
+        platform,
+        selfIds,
+        threadLimit: limits.threadLimit,
+        messageLimit: limits.messageLimit,
+      });
+    } catch (error) {
+      this.logger.warn(
+        { err: error, integrationId: integration.id, pageId, platform },
+        'Meta history import could not read conversations; live messages are unaffected',
+      );
+      summary.failures += 1;
+      return summary;
+    }
+
+    summary.threads = threads.length;
+
+    for (const thread of threads) {
+      for (const normalized of toNormalizedMessages(thread, inboxId, channel, selfIds)) {
+        try {
+          const result = await this.ingest.ingest(integration, normalized);
+          if (result.created) summary.messagesCreated += 1;
+          else summary.duplicates += 1;
+        } catch (error) {
+          // One malformed thread must not abandon the rest of the import.
+          summary.failures += 1;
+          this.logger.warn(
+            { err: error, integrationId: integration.id, externalMessageId: normalized.externalMessageId },
+            'Skipping a message that failed to import',
+          );
+        }
       }
     }
+
+    await this.prisma.integration.update({
+      where: { id: integration.id },
+      data: { lastSyncedAt: new Date() },
+    });
+
+    this.logger.log(
+      { integrationId: integration.id, pageId, inboxId, channel, ...summary },
+      'Meta history import finished',
+    );
+    return summary;
   }
-
-  await prisma.integration.update({
-    where: { id: integration.id },
-    data: { lastSyncedAt: new Date() },
-  });
-
-  logger.info(
-    { integrationId: integration.id, pageId, inboxId, channel, ...summary },
-    'Meta history import finished',
-  );
-  return summary;
 }

@@ -9,15 +9,30 @@
     "strict": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "sourceMap": true,
     "declaration": false,
-    "types": ["node"]
+    "types": ["node"],
+
+    // Nest's DI reads constructor parameter types at runtime from the metadata
+    // the compiler emits, and every @Injectable/@Controller/@Column style
+    // decorator depends on these two flags. Without them the container cannot
+    // resolve a single provider.
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    // Nest resolves optional constructor dependencies to `undefined`, which
+    // strictPropertyInitialization would reject on gateway/server fields that
+    // Nest assigns after construction.
+    "strictPropertyInitialization": false,
+
+    // `noUnusedParameters` fights decorator-heavy controller signatures where a
+    // parameter exists only to be decorated; `noUnusedLocals` stays on.
+    "noUnusedLocals": true,
+    "noUnusedParameters": false
   },
   "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts", "vitest.config.ts", "prisma.config.ts"],
   "exclude": ["node_modules", "dist"]
