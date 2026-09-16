@@ -1,7 +1,7 @@
 import { env } from '../../config/env';
 import { logger } from '../../config/logger';
 import { prisma } from '../../database/prisma';
-import { IntegrationStatus, IntegrationType } from '../../generated/prisma/enums';
+import { Channel, IntegrationStatus, IntegrationType } from '../../generated/prisma/enums';
 import {
   buildAuthorizeUrl,
   exchangeCodeForUserToken,
@@ -9,20 +9,20 @@ import {
   listManagedPages,
   subscribePageToApp,
   type MetaManagedPage,
-} from '../../channels/facebook/facebook.oauth';
+} from '../../channels/meta/meta.oauth';
 import { channelForIntegrationType, getProvider } from '../../channels';
 import { BadRequestError, IntegrationConfigurationError } from '../../utils/errors';
 import type { AuthContext } from '../../types/auth';
 import type { ClientContext } from '../auth/auth.service';
-import { connectFacebook, type IntegrationDto } from './integration.service';
-import { importRecentHistory, type ImportSummary } from './facebook-import.service';
+import { connectMetaInbox, type IntegrationDto } from './integration.service';
+import { importRecentHistory, type ImportSummary } from './meta-import.service';
 import {
   createState,
   discardHandoff,
   readHandoff,
   readState,
   saveHandoff,
-} from './facebook-oauth.store';
+} from './meta-oauth.store';
 
 /**
  * The "Connect Facebook" button, server side.
@@ -38,24 +38,47 @@ import {
  * database after that.
  */
 
-/** A Page as the picker shows it. Note the absence of any token field. */
-export interface SelectablePage {
-  id: string;
-  name: string;
-  category: string | null;
-  pictureUrl: string | null;
-  /** Already delivering to this app's webhook. Reconnecting is still allowed. */
-  alreadySubscribed: boolean;
+/** Whether a given inbox can be claimed by the workspace doing the login. */
+interface Availability {
   /** Connected to a different workspace, so this operator cannot claim it. */
   unavailable: boolean;
   /** Already connected to *this* workspace. */
   connectedHere: boolean;
 }
 
-export interface FacebookLoginResult {
+/**
+ * The Instagram account linked to a Page, as the picker shows it.
+ *
+ * Availability is tracked separately from the Page's: the same login can offer
+ * a Messenger inbox this workspace already owns next to an Instagram inbox it
+ * does not, and the two are independent integration rows.
+ */
+export interface SelectableInstagram extends Availability {
+  id: string;
+  username: string | null;
+  name: string | null;
+  pictureUrl: string | null;
+}
+
+/** A Page as the picker shows it. Note the absence of any token field. */
+export interface SelectablePage extends Availability {
+  id: string;
+  name: string;
+  category: string | null;
+  pictureUrl: string | null;
+  /** Already delivering to this app's webhook. Reconnecting is still allowed. */
+  alreadySubscribed: boolean;
+  /** Null when no Professional Instagram account is linked to this Page. */
+  instagram: SelectableInstagram | null;
+}
+
+export interface MetaLoginResult {
   handoffId: string;
   pages: SelectablePage[];
 }
+
+/** @deprecated Use {@link MetaLoginResult}; kept so callers need not churn. */
+export type FacebookLoginResult = MetaLoginResult;
 
 export interface ConnectPageResult {
   integration: IntegrationDto;
@@ -163,33 +186,60 @@ async function toSelectablePages(
   organizationId: string,
   pages: MetaManagedPage[],
 ): Promise<SelectablePage[]> {
+  const pageIds = pages.map((page) => page.id);
+  const instagramIds = pages
+    .map((page) => page.instagram?.id)
+    .filter((id): id is string => Boolean(id));
+
+  // One query covers both channels. Type and inbox id together are what the
+  // unique index is on, so a Page id and an IG account id can never collide.
   const claimed = await prisma.integration.findMany({
     where: {
-      type: IntegrationType.FACEBOOK,
-      externalPageId: { in: pages.map((page) => page.id) },
+      OR: [
+        { type: IntegrationType.FACEBOOK, externalPageId: { in: pageIds } },
+        { type: IntegrationType.INSTAGRAM, externalPageId: { in: instagramIds } },
+      ],
     },
-    select: { externalPageId: true, organizationId: true, status: true },
+    select: { type: true, externalPageId: true, organizationId: true, status: true },
   });
-  const claimedBy = new Map(claimed.map((row) => [row.externalPageId, row]));
+  const claimedBy = new Map(claimed.map((row) => [`${row.type}:${row.externalPageId}`, row]));
 
-  return pages.map((page) => {
-    const owner = claimedBy.get(page.id);
+  const availability = (type: IntegrationType, inboxId: string): Availability => {
+    const owner = claimedBy.get(`${type}:${inboxId}`);
     const ownedElsewhere = Boolean(owner && owner.organizationId !== organizationId);
     return {
-      id: page.id,
-      name: page.name,
-      category: page.category,
-      pictureUrl: page.pictureUrl,
-      alreadySubscribed: page.alreadySubscribed,
       unavailable: ownedElsewhere,
       connectedHere:
         Boolean(owner) && !ownedElsewhere && owner?.status === IntegrationStatus.CONNECTED,
     };
-  });
+  };
+
+  return pages.map((page) => ({
+    id: page.id,
+    name: page.name,
+    category: page.category,
+    pictureUrl: page.pictureUrl,
+    alreadySubscribed: page.alreadySubscribed,
+    ...availability(IntegrationType.FACEBOOK, page.id),
+    instagram: page.instagram
+      ? {
+          id: page.instagram.id,
+          username: page.instagram.username,
+          name: page.instagram.name,
+          pictureUrl: page.instagram.pictureUrl,
+          ...availability(IntegrationType.INSTAGRAM, page.instagram.id),
+        }
+      : null,
+  }));
 }
 
 /**
- * Step three: the operator picked a Page.
+ * Step three: the operator picked an inbox.
+ *
+ * `channel` selects which of the Page's two inboxes is being connected. Both
+ * are authorised by the same Page token and both are delivered by the same
+ * Page subscription — what differs is which id identifies the inbox, and so
+ * which id a webhook resolves back to an integration.
  *
  * Ordered so a failure leaves nothing half-built: the webhook subscription is
  * established first, because a stored integration that Meta is not delivering
@@ -202,6 +252,7 @@ export async function connectPageFromHandoff(
   pageId: string,
   displayName: string | undefined,
   context: ClientContext,
+  channel: Channel = Channel.FACEBOOK,
 ): Promise<ConnectPageResult> {
   assertConnectable();
 
@@ -209,7 +260,7 @@ export async function connectPageFromHandoff(
   if (!handoff) {
     throw new BadRequestError(
       'This Facebook login has expired. Start the connection again.',
-      'FACEBOOK_OAUTH_HANDOFF_EXPIRED',
+      'META_OAUTH_HANDOFF_EXPIRED',
     );
   }
 
@@ -218,7 +269,7 @@ export async function connectPageFromHandoff(
   if (handoff.organizationId !== actor.organizationId) {
     throw new BadRequestError(
       'This Facebook login does not belong to your workspace.',
-      'FACEBOOK_OAUTH_HANDOFF_FOREIGN',
+      'META_OAUTH_HANDOFF_FOREIGN',
     );
   }
 
@@ -226,41 +277,66 @@ export async function connectPageFromHandoff(
   if (!page) {
     throw new BadRequestError(
       'That Page was not part of this Facebook login.',
-      'FACEBOOK_PAGE_NOT_IN_HANDOFF',
+      'META_PAGE_NOT_IN_HANDOFF',
     );
   }
 
-  // Without this Meta never calls the webhook, and the inbox stays silent.
+  const isInstagram = channel === Channel.INSTAGRAM;
+
+  if (isInstagram && !page.instagram) {
+    throw new BadRequestError(
+      'That Page has no Instagram Professional account linked to it. Link one in the Page settings, then try again.',
+      'INSTAGRAM_NOT_LINKED',
+    );
+  }
+
+  // The inbox id is what a webhook carries and what resolves the tenant: the
+  // Page id for Messenger, the Instagram account id for Instagram Direct.
+  const inboxId = isInstagram ? (page.instagram as { id: string }).id : page.id;
+  const defaultName = isInstagram
+    ? `@${page.instagram?.username ?? page.instagram?.name ?? inboxId}`
+    : page.name;
+
+  // Subscribing the *Page* is what starts delivery for both inboxes; Instagram
+  // has no subscription of its own.
   await subscribePageToApp(page.id, page.accessToken);
 
-  const integration = await connectFacebook(
+  const integration = await connectMetaInbox(
     actor,
     {
-      name: displayName?.trim() || page.name,
-      pageId: page.id,
-      pageAccessToken: page.accessToken,
-      externalAccountId: undefined,
+      type: isInstagram ? IntegrationType.INSTAGRAM : IntegrationType.FACEBOOK,
+      name: displayName?.trim() || defaultName,
+      inboxId,
+      accessToken: page.accessToken,
+      // Instagram records the Page it hangs off, so a reconnect or a token
+      // refresh knows where to go without another login.
+      externalAccountId: isInstagram ? page.id : null,
+      metadata: isInstagram
+        ? { instagramUsername: page.instagram?.username ?? null, pageName: page.name }
+        : { pageName: page.name, category: page.category },
     },
     context,
   );
 
   // History is a convenience, not part of a successful connect — a rate limit
-  // here must not undo a Page that is now correctly subscribed and live.
-  const summary = await importRecentHistory(
-    {
+  // here must not undo an inbox that is now correctly subscribed and live.
+  const summary = await importRecentHistory({
+    integration: {
       id: integration.id,
       organizationId: integration.organizationId,
       status: IntegrationStatus.CONNECTED,
     },
-    page.id,
-    page.accessToken,
-  );
+    pageId: page.id,
+    inboxId,
+    accessToken: page.accessToken,
+    channel,
+  });
 
   await discardHandoff(handoffId);
 
   logger.info(
-    { integrationId: integration.id, pageId: page.id, ...summary },
-    'Facebook Page connected via OAuth',
+    { integrationId: integration.id, pageId: page.id, inboxId, channel, ...summary },
+    'Meta inbox connected via OAuth',
   );
 
   return { integration, import: summary };

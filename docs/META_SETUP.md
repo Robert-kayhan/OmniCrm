@@ -1,26 +1,35 @@
-# Connecting Facebook Messenger
+# Connecting Facebook Messenger and Instagram Direct
 
-This guide takes you from no Meta app to a working **Connect with Facebook**
-button that pulls a Page's conversations into the inbox.
+This guide takes you from no Meta app to working **Connect** buttons that pull
+a Page's Messenger conversations *and* its Instagram Direct conversations into
+the inbox.
+
+Both channels run on one Meta app, one login and one set of credentials. There
+are no separate Instagram keys to obtain: Instagram Direct is authorised by the
+Facebook Page token and delivered by the Page's webhook subscription. That is
+why the connect flow for both starts with Facebook Login.
 
 The code is already written. Everything below is configuration you do in the
 Meta dashboard and in your `.env` files — there is nothing left to build.
 
 ---
 
-## What the button actually does
+## What the buttons actually do
 
-When an operator clicks **Connect with Facebook** in Settings → Integrations:
+**Connect with Facebook** and **Connect Instagram via Facebook** start the same
+login. They differ only in which inbox you pick at the end.
 
 1. The API returns Meta's login URL and the browser navigates to it.
 2. The operator approves the app and picks which Pages to grant.
 3. Meta redirects back to `/api/integrations/facebook/oauth/callback` with a
    one-time `code`.
 4. The API exchanges that code for a user token, extends it to ~60 days, and
-   reads the Pages the operator administers.
-5. The operator picks a Page from a dialog.
-6. The API subscribes that Page to this app's webhook, stores its encrypted
-   Page token, and imports the 50 most recent conversations
+   reads the Pages the operator administers — along with any Instagram
+   Professional account linked to each one.
+5. The operator picks an inbox from a dialog. A Page with a linked Instagram
+   account offers two rows: Messenger and Instagram Direct.
+6. The API subscribes the Page to this app's webhook, stores the encrypted Page
+   token against the chosen inbox, and imports the 50 most recent conversations
    (50 messages each).
 
 From then on, new messages arrive over the webhook in real time.
@@ -28,6 +37,20 @@ From then on, new messages arrive over the webhook in real time.
 Page access tokens never reach the browser. They are held encrypted for the ten
 minutes between steps 4 and 5, then encrypted at rest in the `Integration`
 table.
+
+### How the two channels differ
+
+|  | Messenger | Instagram Direct |
+|---|---|---|
+| Inbox id (what a webhook resolves to) | Facebook Page id | Instagram account id |
+| Credential | Page access token | the same Page access token |
+| Webhook path | `/api/webhooks/facebook` | `/api/webhooks/instagram` |
+| Webhook `object` | `page` | `instagram` |
+| Subscription | `POST /{page-id}/subscribed_apps` | the same Page subscription |
+| Manual token fallback | yes | no — it has no token of its own |
+
+They are two separate `Integration` rows, so connecting one does not connect
+the other, and disconnecting one leaves the other running.
 
 ---
 
@@ -37,7 +60,8 @@ You need three things:
 
 | Requirement | Why |
 |---|---|
-| A Facebook **Page** | Messenger conversations belong to a Page, not a person. |
+| A Facebook **Page** | Messenger conversations belong to a Page, not a person — and Instagram Direct is reached through one. |
+| An **Instagram Professional account**, linked to that Page | Instagram only. A personal Instagram account cannot receive Direct messages through the API. |
 | A **Meta developer account** | https://developers.facebook.com — free. |
 | A **public HTTPS URL** | Meta cannot call `localhost`. A tunnel for local work (step 2), or [your own domain](#using-a-custom-domain-for-the-backend) for a real deployment. |
 
@@ -291,8 +315,11 @@ curl -s https://api.yourdomain.com/api/health | jq
 
 # The webhook handshake answers on the new domain. Substitute your
 # META_WEBHOOK_VERIFY_TOKEN; it should echo 12345 back.
-curl -s "https://api.yourdomain.com/api/webhooks/facebook\
-?hub.mode=subscribe&hub.verify_token=YOUR_VERIFY_TOKEN&hub.challenge=12345"
+VERIFY=YOUR_VERIFY_TOKEN
+curl -s "https://api.yourdomain.com/api/webhooks/facebook?hub.mode=subscribe&hub.verify_token=$VERIFY&hub.challenge=12345"
+
+# The Instagram webhook answers on its own path
+curl -s "https://api.yourdomain.com/api/webhooks/instagram?hub.mode=subscribe&hub.verify_token=$VERIFY&hub.challenge=12345"
 
 # The authorize URL now carries the custom domain as redirect_uri
 curl -s -H "Authorization: Bearer $TOKEN" \
@@ -334,6 +361,22 @@ Two caveats:
 4. Leave **Client OAuth Login** and **Web OAuth Login** enabled.
 5. Save.
 
+The login requests these permissions, covering both channels — you do not
+configure them here, but they are what App Review will ask about:
+
+| Permission | Used for |
+|---|---|
+| `pages_show_list` | listing the Pages the operator administers |
+| `pages_messaging` | sending and receiving on Messenger |
+| `pages_read_engagement` | reading conversation history |
+| `pages_manage_metadata` | subscribing the Page to this app's webhook |
+| `instagram_basic` | reading the Instagram account linked to a Page |
+| `instagram_manage_messages` | sending and receiving on Instagram Direct |
+
+Instagram needs the `pages_*` scopes too: its credential is the Page token and
+its subscription is the Page's. Override the set with `META_OAUTH_SCOPES` only
+if you know why.
+
 On a custom domain this is
 `https://api.yourdomain.com/api/integrations/facebook/oauth/callback` instead.
 
@@ -371,16 +414,52 @@ automatically.
 
 ---
 
+## Step 4b — Add Instagram and point its webhook at your API
+
+Skip this if you only want Messenger. Instagram delivers to a **different
+callback path** and is configured under a different product, even though it is
+the same app and the same verify token.
+
+1. **Add product** → **Instagram** → **Set up**.
+2. Go to **Instagram → Webhooks** (on some dashboards: **Instagram → API setup
+   with Instagram login → Webhooks**) → **Add callback URL**.
+3. Fill in:
+
+   | Field | Value |
+   |---|---|
+   | Callback URL | `https://api.yourdomain.com/api/webhooks/instagram` |
+   | Verify token | the same `META_WEBHOOK_VERIFY_TOKEN` as step 4 |
+
+   Note the path: **`/instagram`**, not `/facebook`. Pointing Instagram at the
+   Facebook path makes every delivery fail, because the Facebook provider looks
+   for a Page id where Instagram sends an account id.
+
+4. Click **Verify and save**.
+5. Under **Webhook fields**, subscribe to at least:
+
+   - `messages`
+   - `messaging_postbacks`
+
+6. In **App settings → Basic**, confirm the Instagram account you intend to
+   connect is linked to the Page. If **Instagram Direct** shows "no linked
+   account" in the picker, fix it in the Facebook Page's settings under
+   **Linked accounts**, then log in again.
+
+---
+
 ## Step 5 — Restart the API and connect
 
 ```bash
 cd backend && pnpm dev
 ```
 
-Then in the CRM: **Settings → Integrations → Connect with Facebook**.
+Then in the CRM: **Settings → Integrations**, and either **Connect with
+Facebook** or **Connect Instagram via Facebook** — both start the same login.
 
-You should see Meta's login, then a dialog listing your Pages, then a toast
-reporting how many messages were imported.
+You should see Meta's login, then a dialog listing your inboxes, then a toast
+reporting how many messages were imported. A Page with a linked Instagram
+Professional account appears twice, once per channel, each with its own
+Connect button. Connect both if you want both; they are independent.
 
 ---
 
@@ -396,8 +475,15 @@ sees an error at login.
 
 Going live for the general public requires **App Review** for
 `pages_messaging`, `pages_show_list`, `pages_read_engagement` and
-`pages_manage_metadata`. That is a Meta process with a demo video and a
-business verification; it has nothing to do with this codebase.
+`pages_manage_metadata` — plus `instagram_basic` and
+`instagram_manage_messages` if you use Instagram. That is a Meta process with a
+demo video and a business verification; it has nothing to do with this
+codebase.
+
+Instagram has one extra development-mode rule worth knowing: the Instagram
+account must have **Allow access to messages** enabled in the Instagram app
+under **Settings → Privacy → Messages → Connected tools**. Without it Meta
+accepts the connect and then delivers nothing.
 
 ---
 
@@ -424,6 +510,28 @@ https://www.facebook.com/pages/?category=your_pages.
 **History imported but names show as "Unknown"**
 Meta withholds profile details until the person has messaged the Page and the
 app holds the right permission. The names fill in as people write in.
+
+**The picker shows a Page but no Instagram row under it**
+No Instagram Professional account is linked to that Page, or the login did not
+grant `instagram_basic`. Link the account in the Page's **Linked accounts**
+settings, then start the connection again so a fresh token is issued.
+
+**Instagram connects but no messages arrive**
+Three things to check, in order: the Instagram webhook callback points at
+`/api/webhooks/instagram` and not `/api/webhooks/facebook`; the `messages`
+field is subscribed under the **Instagram** product, not only under Messenger;
+and **Connected tools** is enabled in the Instagram app's message privacy
+settings.
+
+**"That Page has no Instagram Professional account linked to it"**
+The connect was attempted for a Page whose `instagram_business_account` is
+null. A personal Instagram account will not do — convert it to Professional
+(Business or Creator) in the Instagram app, then link it to the Page.
+
+**Instagram history imported far fewer threads than Messenger**
+Expected. Meta's conversations edge only returns Instagram threads from within
+the last 30 days or so, and only for people who have messaged the account.
+Anything older arrives as customers write in again.
 
 **Everyone gets rate-limited at once after moving to a domain**
 `TRUST_PROXY_HOPS` is still `0`, so every request appears to come from the
@@ -473,3 +581,8 @@ log in to this CRM.
 
 That path does **not** subscribe the Page or import history. If you use it, do
 the subscription yourself in the Messenger dashboard.
+
+There is no manual equivalent for Instagram Direct, and that is deliberate
+rather than missing: an Instagram inbox has no token of its own to paste. It is
+authorised entirely by the Page token, so connecting one always goes through
+the Page — either via the Connect button, or not at all.

@@ -8,7 +8,8 @@ import { AppError } from '../../utils/errors';
 import type { IdParam } from '../../utils/validation';
 import { auditContextFromRequest } from '../audit-logs/audit-log.service';
 import * as service from './integration.service';
-import * as oauth from './facebook-oauth.service';
+import * as oauth from './meta-oauth.service';
+import { channelForIntegrationType } from '../../channels';
 import type {
   ConnectFacebookInput,
   ConnectFacebookPageInput,
@@ -130,7 +131,7 @@ export async function facebookOAuthCallbackHandler(req: Request, res: Response) 
   }
 }
 
-/** Connects the Page the operator picked and reports what the import found. */
+/** Connects the inbox the operator picked and reports what the import found. */
 export async function connectFacebookPageHandler(req: Request, res: Response) {
   const auth = getAuth(req);
   const input = body<ConnectFacebookPageInput>(req);
@@ -140,6 +141,7 @@ export async function connectFacebookPageHandler(req: Request, res: Response) {
     input.pageId,
     input.name,
     auditContextFromRequest(req),
+    channelForIntegrationType(input.channel),
   );
   return sendCreated(res, result);
 }

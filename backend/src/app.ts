@@ -11,6 +11,7 @@ import { errorHandler } from './middleware/error-handler';
 import { notFoundHandler } from './middleware/not-found';
 import { apiRouter } from './routes';
 import { webhookRouter } from './modules/webhooks/webhook.routes';
+import { registerChannelProviders } from './channels';
 
 const corsOptions: CorsOptions = {
   origin(origin, callback) {
@@ -30,6 +31,12 @@ const corsOptions: CorsOptions = {
 
 export function createApp(): Express {
   const app = express();
+
+  // Providers register as part of building the app, not as a separate boot
+  // step: the webhook routes resolve a channel through the registry, so
+  // anything that constructs the app — the server, a test — must get a fully
+  // populated one or those routes 404. Registration is idempotent.
+  registerChannelProviders();
 
   // Rate limiting and audit logs need the real client IP, which only arrives
   // through X-Forwarded-For. Trust exactly as many hops as are deployed —

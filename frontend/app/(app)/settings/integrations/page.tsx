@@ -175,6 +175,57 @@ function ConnectFacebookDialog({
 
 
 /**
+ * One connectable inbox.
+ *
+ * A Page yields one row for Messenger and, when a Professional Instagram
+ * account is linked, a second for Instagram Direct. They are separate
+ * integrations with separate availability, so the picker flattens them rather
+ * than nesting Instagram under its Page.
+ */
+interface InboxChoice {
+  /** Unique per row, since one Page can appear twice. */
+  key: string;
+  page: SelectablePage;
+  channel: 'FACEBOOK' | 'INSTAGRAM';
+  name: string;
+  subtitle: string;
+  pictureUrl: string | null;
+  unavailable: boolean;
+  connectedHere: boolean;
+}
+
+function inboxesForPage(page: SelectablePage): InboxChoice[] {
+  const rows: InboxChoice[] = [
+    {
+      key: `FACEBOOK:${page.id}`,
+      page,
+      channel: 'FACEBOOK',
+      name: page.name,
+      subtitle: page.category ?? `Page ${page.id}`,
+      pictureUrl: page.pictureUrl,
+      unavailable: page.unavailable,
+      connectedHere: page.connectedHere,
+    },
+  ];
+
+  if (page.instagram) {
+    const handle = page.instagram.username ? `@${page.instagram.username}` : page.instagram.name;
+    rows.push({
+      key: `INSTAGRAM:${page.instagram.id}`,
+      page,
+      channel: 'INSTAGRAM',
+      name: handle ?? `Instagram ${page.instagram.id}`,
+      subtitle: `Instagram · linked to ${page.name}`,
+      pictureUrl: page.instagram.pictureUrl ?? page.pictureUrl,
+      unavailable: page.instagram.unavailable,
+      connectedHere: page.instagram.connectedHere,
+    });
+  }
+
+  return rows;
+}
+
+/**
  * The Page picker.
  *
  * Opens when the operator lands back from Meta with a handoff id in the URL.
@@ -201,9 +252,16 @@ function FacebookPagePicker({
   });
 
   const connect = useMutation({
-    mutationFn: (page: SelectablePage) =>
-      api.integrations.connectFacebookPage({ handoffId, pageId: page.id, name: page.name }),
-    onMutate: (page) => setPendingPageId(page.id),
+    mutationFn: (choice: InboxChoice) =>
+      api.integrations.connectFacebookPage({
+        handoffId,
+        // Always the Page id: Instagram Direct is reached through the Page it
+        // is linked to, and the channel picks which inbox.
+        pageId: choice.page.id,
+        channel: choice.channel,
+        name: choice.name,
+      }),
+    onMutate: (choice) => setPendingPageId(choice.key),
     onSettled: () => setPendingPageId(null),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
@@ -229,8 +287,9 @@ function FacebookPagePicker({
         <DialogHeader>
           <DialogTitle>Choose a Page</DialogTitle>
           <DialogDescription>
-            These are the Facebook Pages your account administers. Connecting one subscribes it to
-            this app&apos;s webhook and imports its recent conversations.
+            These are the inboxes your Facebook account administers. A Page with a linked
+            Instagram Professional account offers both, and they connect separately. Connecting one
+            subscribes it to this app&apos;s webhook and imports its recent conversations.
           </DialogDescription>
         </DialogHeader>
 
@@ -248,44 +307,48 @@ function FacebookPagePicker({
           </p>
         ) : (
           <div className="space-y-2">
-            {data?.pages.map((page) => {
-              const busy = connect.isPending && pendingPageId === page.id;
+            {(data?.pages ?? []).flatMap(inboxesForPage).map((choice) => {
+              const busy = connect.isPending && pendingPageId === choice.key;
               return (
-                <div
-                  key={page.id}
-                  className="flex items-center gap-3 rounded-lg border p-3"
-                >
-                  {page.pictureUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={page.pictureUrl}
-                      alt=""
-                      className="size-9 shrink-0 rounded-full object-cover"
+                <div key={choice.key} className="flex items-center gap-3 rounded-lg border p-3">
+                  <div className="relative shrink-0">
+                    {choice.pictureUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={choice.pictureUrl}
+                        alt=""
+                        className="size-9 rounded-full object-cover"
+                      />
+                    ) : (
+                      <div className="size-9 rounded-full bg-muted" />
+                    )}
+                    {/* Two rows can share one avatar, so the channel badge is
+                        what tells a Messenger inbox from an Instagram one. */}
+                    <ChannelIcon
+                      channel={choice.channel}
+                      withBackground
+                      className="absolute -bottom-0.5 -right-0.5 size-4 ring-2 ring-background"
                     />
-                  ) : (
-                    <div className="size-9 shrink-0 rounded-full bg-muted" />
-                  )}
-
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{page.name}</p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {page.category ?? `Page ${page.id}`}
-                    </p>
                   </div>
 
-                  {page.unavailable ? (
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{choice.name}</p>
+                    <p className="truncate text-xs text-muted-foreground">{choice.subtitle}</p>
+                  </div>
+
+                  {choice.unavailable ? (
                     <Badge variant="muted" className="shrink-0">
                       Another workspace
                     </Badge>
                   ) : (
                     <Button
                       size="sm"
-                      variant={page.connectedHere ? 'outline' : 'default'}
-                      onClick={() => connect.mutate(page)}
+                      variant={choice.connectedHere ? 'outline' : 'default'}
+                      onClick={() => connect.mutate(choice)}
                       disabled={connect.isPending}
                     >
                       {busy ? <Spinner /> : null}
-                      {page.connectedHere ? 'Reconnect' : 'Connect'}
+                      {choice.connectedHere ? 'Reconnect' : 'Connect'}
                     </Button>
                   )}
                 </div>
@@ -311,7 +374,13 @@ function FacebookPagePicker({
  * here — the app id and scopes are server configuration, and duplicating them
  * in the bundle would let the two drift apart.
  */
-function ConnectWithFacebookButton({ disabled }: { disabled: boolean }) {
+function ConnectWithFacebookButton({
+  disabled,
+  label = 'Connect with Facebook',
+}: {
+  disabled: boolean;
+  label?: string;
+}) {
   const start = useMutation({
     mutationFn: () => api.integrations.facebookOAuthUrl(),
     onSuccess: ({ authorizeUrl }) => {
@@ -333,7 +402,7 @@ function ConnectWithFacebookButton({ disabled }: { disabled: boolean }) {
       className="bg-[#1877F2] text-white hover:bg-[#1877F2]/90"
     >
       {start.isPending ? <Spinner /> : <ChannelIcon channel="FACEBOOK" className="size-3.5" />}
-      Connect with Facebook
+      {label}
     </Button>
   );
 }
@@ -413,6 +482,10 @@ function ChannelCard({ capability }: { capability: ChannelCapability }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const canManage = can(PERMISSIONS.INTEGRATION_MANAGE);
   const isFacebook = capability.channel === 'FACEBOOK';
+  const isInstagram = capability.channel === 'INSTAGRAM';
+  // Both Meta inboxes are claimed through the same Facebook Login, so the
+  // Instagram card offers the same button rather than a second flow.
+  const isMeta = isFacebook || isInstagram;
 
   return (
     <Card>
@@ -462,37 +535,52 @@ function ChannelCard({ capability }: { capability: ChannelCapability }) {
           </p>
         )}
 
-        {isFacebook && canManage ? (
+        {isMeta && canManage ? (
           <>
             {!capability.configured ? (
               <p className="rounded-md bg-warning/10 px-3 py-2 text-xs text-warning-foreground">
                 Set <code className="font-mono">META_APP_ID</code>,{' '}
                 <code className="font-mono">META_APP_SECRET</code> and{' '}
                 <code className="font-mono">META_WEBHOOK_VERIFY_TOKEN</code> in the API environment,
-                then restart it before connecting a Page.
+                then restart it before connecting an account.
+              </p>
+            ) : null}
+
+            {isInstagram ? (
+              <p className="text-xs text-muted-foreground">
+                Instagram Direct is authorised through Facebook: your Instagram Professional account
+                must be linked to a Page you administer.
               </p>
             ) : null}
 
             <div className="flex flex-wrap items-center gap-2">
-              <ConnectWithFacebookButton disabled={!capability.configured} />
+              <ConnectWithFacebookButton
+                disabled={!capability.configured}
+                label={isInstagram ? 'Connect Instagram via Facebook' : 'Connect with Facebook'}
+              />
 
               {/*
                 The original paste-a-token path, kept for the cases OAuth cannot
                 serve: a System User token, or a Page whose admin cannot log in
-                here. Secondary, because it is no longer the normal route.
+                here. Facebook only — an Instagram inbox has no token of its own
+                to paste, since the Page token is what authorises it.
               */}
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setDialogOpen(true)}
-                disabled={!capability.configured}
-              >
-                <Plus className="size-3.5" />
-                Enter a token manually
-              </Button>
+              {isFacebook ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setDialogOpen(true)}
+                  disabled={!capability.configured}
+                >
+                  <Plus className="size-3.5" />
+                  Enter a token manually
+                </Button>
+              ) : null}
             </div>
 
-            <ConnectFacebookDialog open={dialogOpen} onOpenChange={setDialogOpen} />
+            {isFacebook ? (
+              <ConnectFacebookDialog open={dialogOpen} onOpenChange={setDialogOpen} />
+            ) : null}
           </>
         ) : null}
       </CardContent>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createState, readState } from '../../src/modules/integrations/facebook-oauth.store';
-import { toNormalizedMessages } from '../../src/modules/integrations/facebook-import.service';
-import type { MetaThread } from '../../src/channels/facebook/facebook.oauth';
+import { createState, readState } from '../../src/modules/integrations/meta-oauth.store';
+import { toNormalizedMessages } from '../../src/modules/integrations/meta-import.service';
+import type { MetaThread } from '../../src/channels/meta/meta.oauth';
 
 /**
  * The two pieces of the connect flow that can be tested without Meta.
