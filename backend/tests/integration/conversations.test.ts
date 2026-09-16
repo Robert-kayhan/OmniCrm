@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { api, createCustomer, createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { api, createCustomer, createWorkspace, db } from '../helpers/factories';
 import { Channel, ConversationStatus } from '../../src/generated/prisma/enums';
 
 async function seedConversation(organizationId: string, overrides: Record<string, unknown> = {}) {
   const customer = await createCustomer(organizationId);
-  const conversation = await prisma.conversation.create({
+  const conversation = await db().conversation.create({
     data: {
       organizationId,
       customerId: customer.id,
@@ -65,7 +64,7 @@ describe('POST /api/conversations', () => {
       .send({ customerId: customer.id, channel: 'EMAIL', assignedUserId: agent.userId })
       .expect(201);
 
-    const history = await prisma.conversationAssignment.findMany({
+    const history = await db().conversationAssignment.findMany({
       where: { conversationId: response.body.data.id },
     });
     expect(history).toHaveLength(1);

@@ -4,14 +4,14 @@
   "packageManager": "pnpm@10.33.0",
   "private": true,
   "type": "commonjs",
-  "main": "dist/server.js",
+  "main": "dist/main.js",
   "engines": {
     "node": ">=20.19"
   },
   "scripts": {
-    "dev": "tsx watch --clear-screen=false src/server.ts",
-    "build": "prisma generate && tsc -p tsconfig.build.json",
-    "start": "node dist/server.js",
+    "dev": "nest start --watch",
+    "build": "prisma generate && nest build",
+    "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -22,40 +22,55 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:reset": "prisma migrate reset --force",
     "prisma:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "start:debug": "nest start --debug --watch"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "@prisma/engines",
+      "@swc/core",
       "esbuild",
       "prisma"
     ]
   },
   "dependencies": {
+    "@nest-lab/throttler-storage-redis": "^1.2.0",
+    "@nestjs/common": "^11.2.5",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.2.5",
+    "@nestjs/platform-express": "^11.2.5",
+    "@nestjs/platform-socket.io": "^11.2.5",
+    "@nestjs/swagger": "^11.4.7",
+    "@nestjs/throttler": "^6.5.0",
+    "@nestjs/websockets": "^11.2.5",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "@socket.io/redis-adapter": "^8.3.0",
     "bcryptjs": "^3.0.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.4",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
-    "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "express-rate-limit": "^8.2.1",
     "helmet": "^8.1.0",
     "ioredis": "^5.9.0",
     "jsonwebtoken": "^9.0.2",
+    "nestjs-pino": "^4.6.1",
     "pg": "^8.16.3",
     "pino": "^9.13.1",
-    "pino-http": "^10.5.0",
-    "rate-limit-redis": "^4.2.2",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
     "socket.io": "^4.8.1",
     "zod": "^4.1.13"
   },
   "devDependencies": {
+    "@nestjs/cli": "^11.0.24",
+    "@nestjs/schematics": "^11.1.0",
+    "@nestjs/testing": "^11.2.5",
+    "@swc/core": "^1.16.2",
     "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.9",
-    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.18.9",
@@ -66,6 +81,7 @@
     "supertest": "^7.1.4",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
+    "unplugin-swc": "^1.6.0",
     "vitest": "^3.2.4"
   }
 }

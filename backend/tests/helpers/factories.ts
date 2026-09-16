@@ -1,23 +1,15 @@
 import request from 'supertest';
-import type { Express } from 'express';
-import { createApp } from '../../src/app';
-import { prisma } from '../../src/database/prisma';
+import { PasswordService } from '../../src/common/crypto/password.service';
+import { TokenService } from '../../src/common/auth/token.service';
 import { UserRole, UserStatus } from '../../src/generated/prisma/enums';
-import { hashPassword } from '../../src/utils/password';
-import { signAccessToken } from '../../src/utils/jwt';
+import { db, httpServer, testApp } from './app';
+
+export { db, testApp } from './app';
 
 export const TEST_PASSWORD = 'Password123!';
 
-let app: Express | null = null;
-
-/** One Express instance for the whole run — creating it per test is wasteful. */
-export function getApp(): Express {
-  app ??= createApp();
-  return app;
-}
-
 export function api() {
-  return request(getApp());
+  return request(httpServer());
 }
 
 export interface TestActor {
@@ -37,7 +29,7 @@ function unique(prefix: string): string {
 }
 
 export async function createOrganization(name = 'Test Org') {
-  return prisma.organization.create({
+  return db().organization.create({
     data: { name, slug: unique('test-org') },
     select: { id: true, name: true, slug: true },
   });
@@ -46,10 +38,10 @@ export async function createOrganization(name = 'Test Org') {
 /**
  * Creates an active user and mints the access token directly.
  *
- * The token is signed by the same helper the login endpoint uses and is
- * validated by the same middleware, so route tests lose nothing — while
- * skipping a login round trip per fixture user. The login flow itself is
- * covered end to end in `auth.test.ts`, which is where it belongs.
+ * The token is signed by the same service the login endpoint uses and is
+ * validated by the same guard, so route tests lose nothing — while skipping a
+ * login round trip per fixture user. The login flow itself is covered end to
+ * end in `auth.test.ts`, which is where it belongs.
  */
 export async function createActor(options: {
   organizationId: string;
@@ -59,20 +51,22 @@ export async function createActor(options: {
 }): Promise<TestActor> {
   const role = options.role ?? UserRole.AGENT;
   const email = options.email ?? `${unique('user')}@test.local`;
+  const passwords = testApp().get(PasswordService);
+  const tokens = testApp().get(TokenService);
 
-  const user = await prisma.user.create({
+  const user = await db().user.create({
     data: {
       organizationId: options.organizationId,
       name: options.name ?? `Test ${role}`,
       email,
-      password: await hashPassword(TEST_PASSWORD),
+      password: await passwords.hash(TEST_PASSWORD),
       role,
       status: UserStatus.ACTIVE,
     },
     select: { id: true, organizationId: true, email: true, role: true },
   });
 
-  const accessToken = signAccessToken({
+  const accessToken = tokens.signAccessToken({
     userId: user.id,
     organizationId: user.organizationId,
     role: user.role,
@@ -100,8 +94,11 @@ export async function createWorkspace() {
   return { organization, admin, manager, agent, otherAgent };
 }
 
-export async function createCustomer(organizationId: string, overrides: Record<string, unknown> = {}) {
-  return prisma.customer.create({
+export async function createCustomer(
+  organizationId: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return db().customer.create({
     data: {
       organizationId,
       firstName: 'Test',

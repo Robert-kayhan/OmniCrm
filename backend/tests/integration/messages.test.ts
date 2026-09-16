@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { api, createCustomer, createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { api, createCustomer, createWorkspace, db } from '../helpers/factories';
 import { Channel, IntegrationType, SenderType } from '../../src/generated/prisma/enums';
 
 async function seedConversation(organizationId: string) {
   const customer = await createCustomer(organizationId);
-  const conversation = await prisma.conversation.create({
+  const conversation = await db().conversation.create({
     data: { organizationId, customerId: customer.id, channel: Channel.WEBSITE },
   });
   return { customer, conversation };
@@ -42,7 +41,7 @@ describe('POST /api/conversations/:id/messages', () => {
 
     expect(response.body.code).toBe('CONVERSATION_NOT_DELIVERABLE');
     // Nothing is persisted when delivery was never possible.
-    expect(await prisma.message.count({ where: { conversationId: conversation.id } })).toBe(0);
+    expect(await db().message.count({ where: { conversationId: conversation.id } })).toBe(0);
   });
 
   it('reports a clear configuration error when the channel has no provider', async () => {
@@ -52,7 +51,7 @@ describe('POST /api/conversations/:id/messages', () => {
     // WhatsApp deliberately: it is a channel the product knows about but has
     // no provider for. Facebook and Instagram would both reach a real provider
     // and fail later, on the missing token, which is a different error.
-    const integration = await prisma.integration.create({
+    const integration = await db().integration.create({
       data: {
         organizationId: organization.id,
         type: IntegrationType.WHATSAPP,
@@ -61,7 +60,7 @@ describe('POST /api/conversations/:id/messages', () => {
         externalPageId: `wa-${Date.now()}`,
       },
     });
-    const customerChannel = await prisma.customerChannel.create({
+    const customerChannel = await db().customerChannel.create({
       data: {
         customerId: customer.id,
         integrationId: integration.id,
@@ -69,7 +68,7 @@ describe('POST /api/conversations/:id/messages', () => {
         externalUserId: 'wa-1',
       },
     });
-    const conversation = await prisma.conversation.create({
+    const conversation = await db().conversation.create({
       data: {
         organizationId: organization.id,
         customerId: customer.id,
@@ -87,7 +86,7 @@ describe('POST /api/conversations/:id/messages', () => {
 
     // The API says the channel is unavailable rather than pretending it sent.
     expect(response.body.code).toBe('CHANNEL_NOT_SUPPORTED');
-    expect(await prisma.message.count({ where: { conversationId: conversation.id } })).toBe(0);
+    expect(await db().message.count({ where: { conversationId: conversation.id } })).toBe(0);
   });
 
   it('requires content or an attachment', async () => {
@@ -120,7 +119,7 @@ describe('GET /api/conversations/:id/messages', () => {
     const { conversation } = await seedConversation(organization.id);
 
     for (let index = 0; index < 5; index += 1) {
-      await prisma.message.create({
+      await db().message.create({
         data: {
           conversationId: conversation.id,
           organizationId: organization.id,
@@ -159,7 +158,7 @@ describe('GET /api/conversations/:id/messages', () => {
     const { admin, organization } = await createWorkspace();
     const { conversation } = await seedConversation(organization.id);
 
-    await prisma.message.createMany({
+    await db().message.createMany({
       data: [
         {
           conversationId: conversation.id,

@@ -1,5 +1,9 @@
-import { afterAll, beforeEach } from 'vitest';
-import { prisma } from '../../src/database/prisma';
+import { afterAll, beforeAll, beforeEach } from 'vitest';
+import { closeTestApp, db, initTestApp } from './app';
+
+beforeAll(async () => {
+  await initTestApp();
+});
 
 /**
  * Resets the database between tests.
@@ -20,10 +24,12 @@ beforeEach(async () => {
   // during cleanup, so atomicity buys nothing — and opening an interactive
   // transaction adds a connection-acquisition wait that fails intermittently
   // when the Docker port proxy is slow.
-  await prisma.$executeRawUnsafe('DELETE FROM "public"."webhook_events"');
-  await prisma.$executeRawUnsafe('DELETE FROM "public"."organizations"');
+  await db().$executeRawUnsafe('DELETE FROM "public"."webhook_events"');
+  await db().$executeRawUnsafe('DELETE FROM "public"."organizations"');
 });
 
 afterAll(async () => {
-  await prisma.$disconnect();
+  // Closing the application runs the shutdown hooks, which disconnect Prisma
+  // and Redis — so the suite does not leave a pool open behind it.
+  await closeTestApp();
 });

@@ -1,12 +1,29 @@
-import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { query } from '../../middleware/validate';
-import { sendSuccess } from '../../utils/response';
-import { listAuditLogs } from './audit-log.service';
-import type { ListAuditLogsQuery } from './audit-log.schema';
+import { Controller, Get, Query } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiPaginatedResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { PERMISSIONS } from '../../config/permissions';
+import { CurrentUser, RequirePermissions } from '../../common/decorators/auth.decorators';
+import { withMeta } from '../../common/http/api-response';
+import type { AuthContext } from '../../types/auth';
+import { AuditLogService } from './audit-log.service';
+import { ListAuditLogsQueryDto } from './dto/list-audit-logs.dto';
 
-export async function listAuditLogsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const result = await listAuditLogs(auth.organizationId, query<ListAuditLogsQuery>(req));
-  return sendSuccess(res, result.items, 200, result.meta);
+@ApiTags('Audit logs')
+@ApiBearerAuth('bearer')
+@ApiStandardErrors()
+@Controller('audit-logs')
+export class AuditLogController {
+  constructor(private readonly auditLogs: AuditLogService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'List audit log entries' })
+  @ApiPaginatedResponse()
+  @RequirePermissions(PERMISSIONS.AUDIT_LOG_READ)
+  async list(@CurrentUser() auth: AuthContext, @Query() query: ListAuditLogsQueryDto) {
+    const result = await this.auditLogs.list(auth.organizationId, query);
+    return withMeta(result.items, result.meta);
+  }
 }

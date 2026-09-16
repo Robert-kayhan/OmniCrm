@@ -1,109 +1,194 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+  Res,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiEnvelopeCreatedResponse,
+  ApiEnvelopeResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { body } from '../../middleware/validate';
-import { sendSuccess } from '../../utils/response';
-import { UnauthorizedError } from '../../utils/errors';
-import { auditContextFromRequest, recordAudit } from '../audit-logs/audit-log.service';
-import { AUDIT_ACTIONS, AUDIT_ENTITIES } from '../audit-logs/audit-log.actions';
-import * as authService from './auth.service';
-import { clearRefreshCookie, readRefreshToken, setRefreshCookie } from './auth.cookies';
-import type {
-  ChangePasswordInput,
-  LoginInput,
-  LogoutInput,
-  RefreshInput,
-  RegisterInput,
-} from './auth.schema';
-
-function clientContext(req: Request): authService.ClientContext {
-  return auditContextFromRequest(req);
-}
+import {
+  Client,
+  type ClientContext,
+} from '../../common/decorators/client-context.decorator';
+import {
+  CurrentUser,
+  OptionalAuth,
+  OptionalUser,
+  Public,
+} from '../../common/decorators/auth.decorators';
+import { UnauthorizedError } from '../../common/errors/app.error';
+import { THROTTLERS } from '../../common/throttler/throttler.constants';
+import type { AuthContext } from '../../types/auth';
+import { AuthCookieService } from './auth-cookie.service';
+import { AuthService, type AuthResult } from './auth.service';
+import {
+  ChangePasswordDto,
+  LoginDto,
+  LogoutDto,
+  RefreshDto,
+  RegisterDto,
+} from './dto/auth.dto';
 
 /**
- * The refresh token goes into an httpOnly cookie and is stripped from the JSON
- * body, so browser clients never hold it in JavaScript-reachable storage.
+ * Credential endpoints.
+ *
+ * Every route here carries the tight `auth` throttle on top of the global one,
+ * which is what blunts password spraying: a global budget sized for ordinary
+ * API chatter is far too generous for a login form.
  */
-function respondWithSession(res: Response, result: authService.AuthResult, statusCode = 200) {
-  setRefreshCookie(res, result.tokens.refreshToken, result.tokens.refreshTokenExpiresAt);
+@Throttle({ [THROTTLERS.AUTH]: {} })
+@ApiTags('Auth')
+@ApiStandardErrors()
+@Controller('auth')
+export class AuthController {
+  constructor(
+    private readonly auth: AuthService,
+    private readonly cookies: AuthCookieService,
+  ) {}
 
-  return sendSuccess(
-    res,
-    {
+  /**
+   * The refresh token goes into an httpOnly cookie and is stripped from the JSON
+   * body, so browser clients never hold it in JavaScript-reachable storage.
+   */
+  private session(response: Response, result: AuthResult) {
+    this.cookies.set(response, result.tokens.refreshToken, result.tokens.refreshTokenExpiresAt);
+
+    return {
       user: result.user,
       organization: result.organization,
       permissions: result.permissions,
       accessToken: result.tokens.accessToken,
       tokenType: result.tokens.tokenType,
       expiresIn: result.tokens.expiresIn,
-    },
-    statusCode,
-  );
-}
-
-export async function registerHandler(req: Request, res: Response) {
-  const result = await authService.register(body<RegisterInput>(req), clientContext(req));
-  return respondWithSession(res, result, 201);
-}
-
-export async function loginHandler(req: Request, res: Response) {
-  const result = await authService.login(body<LoginInput>(req), clientContext(req));
-  return respondWithSession(res, result);
-}
-
-export async function refreshHandler(req: Request, res: Response) {
-  const input = body<RefreshInput>(req);
-  const token = readRefreshToken(req, input.refreshToken);
-
-  if (!token) {
-    throw new UnauthorizedError('No refresh token provided', 'REFRESH_TOKEN_MISSING');
+    };
   }
 
-  try {
-    const result = await authService.refresh(token, clientContext(req));
-    return respondWithSession(res, result);
-  } catch (error) {
-    // A rejected refresh always clears the cookie so the browser stops
-    // replaying a token the server will never accept again.
-    clearRefreshCookie(res);
-    throw error;
+  @Public()
+  @Post('register')
+  @ApiOperation({ summary: 'Register a new organization and its first administrator' })
+  @ApiEnvelopeCreatedResponse()
+  @HttpCode(HttpStatus.CREATED)
+  async register(
+    @Body() dto: RegisterDto,
+    @Client() client: ClientContext,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    return this.session(response, await this.auth.register(dto, client));
   }
-}
 
-export async function logoutHandler(req: Request, res: Response) {
-  const input = body<LogoutInput>(req);
-  const token = readRefreshToken(req, input.refreshToken);
+  @Public()
+  @Post('login')
+  @ApiOperation({ summary: 'Exchange credentials for an access token' })
+  @ApiEnvelopeResponse()
+  @HttpCode(HttpStatus.OK)
+  async login(
+    @Body() dto: LoginDto,
+    @Client() client: ClientContext,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    return this.session(response, await this.auth.login(dto, client));
+  }
 
-  await authService.logout({
-    token,
-    userId: req.auth?.userId,
-    allDevices: input.allDevices,
-  });
+  /**
+   * Deliberately public: the access token is expected to be expired by the time
+   * a client calls this, so requiring one would make refresh unusable.
+   */
+  @Public()
+  @Post('refresh')
+  @ApiOperation({ summary: 'Rotate the refresh token for a new access token' })
+  @ApiEnvelopeResponse()
+  @HttpCode(HttpStatus.OK)
+  async refresh(
+    @Body() dto: RefreshDto,
+    @Client() client: ClientContext,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const token = this.cookies.read(request, dto.refreshToken);
 
-  if (req.auth) {
-    await recordAudit({
-      organizationId: req.auth.organizationId,
-      userId: req.auth.userId,
-      action: AUDIT_ACTIONS.AUTH_LOGOUT,
-      entityType: AUDIT_ENTITIES.SESSION,
-      entityId: req.auth.userId,
-      ...clientContext(req),
+    if (!token) {
+      throw new UnauthorizedError('No refresh token provided', 'REFRESH_TOKEN_MISSING');
+    }
+
+    try {
+      return this.session(response, await this.auth.refresh(token, client));
+    } catch (error) {
+      // A rejected refresh always clears the cookie so the browser stops
+      // replaying a token the server will never accept again.
+      this.cookies.clear(response);
+      throw error;
+    }
+  }
+
+  /**
+   * Optional auth so logging out still clears the cookie when the access token
+   * has already expired.
+   */
+  @OptionalAuth()
+  @Post('logout')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({
+    summary: 'Revoke the current session, or every session',
+    description:
+      'Accepts a token but does not require one, so logging out still clears ' +
+      'the refresh cookie after the access token has expired.',
+  })
+  @ApiEnvelopeResponse()
+  @HttpCode(HttpStatus.OK)
+  async logout(
+    @Body() dto: LogoutDto,
+    @OptionalUser() auth: AuthContext | undefined,
+    @Client() client: ClientContext,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const token = this.cookies.read(request, dto.refreshToken);
+
+    await this.auth.logout({
+      token,
+      userId: auth?.userId,
+      allDevices: dto.allDevices,
     });
+
+    if (auth) {
+      await this.auth.recordLogout(auth, client);
+    }
+
+    this.cookies.clear(response);
+    return { loggedOut: true };
   }
 
-  clearRefreshCookie(res);
-  return sendSuccess(res, { loggedOut: true });
-}
+  @Get('me')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Get the authenticated caller' })
+  @ApiEnvelopeResponse()
+  me(@CurrentUser() auth: AuthContext) {
+    return this.auth.getCurrentUser(auth.userId);
+  }
 
-export async function meHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const user = await authService.getCurrentUser(auth.userId);
-  return sendSuccess(res, user);
+  @Post('change-password')
+  @ApiBearerAuth('bearer')
+  @ApiOperation({ summary: 'Change the caller’s password' })
+  @ApiEnvelopeResponse()
+  @HttpCode(HttpStatus.OK)
+  async changePassword(
+    @CurrentUser() auth: AuthContext,
+    @Body() dto: ChangePasswordDto,
+    @Client() client: ClientContext,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    await this.auth.changePassword(auth.userId, dto, client);
+    this.cookies.clear(response);
+    return { passwordChanged: true };
+  }
 }
-
-export async function changePasswordHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  await authService.changePassword(auth.userId, body<ChangePasswordInput>(req), clientContext(req));
-  clearRefreshCookie(res);
-  return sendSuccess(res, { passwordChanged: true });
-}
-

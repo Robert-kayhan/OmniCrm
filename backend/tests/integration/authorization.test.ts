@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { api, createActor, createCustomer, createOrganization, createWorkspace } from '../helpers/factories';
+import { api, createActor, createCustomer, createOrganization, createWorkspace, db } from '../helpers/factories';
 import { UserRole } from '../../src/generated/prisma/enums';
-import { prisma } from '../../src/database/prisma';
 import { Channel } from '../../src/generated/prisma/enums';
 
 describe('multi-tenant isolation', () => {
@@ -46,7 +45,7 @@ describe('multi-tenant isolation', () => {
       .send({ firstName: 'Hijacked' })
       .expect(404);
 
-    const unchanged = await prisma.customer.findUnique({ where: { id: victim.id } });
+    const unchanged = await db().customer.findUnique({ where: { id: victim.id } });
     expect(unchanged?.firstName).toBe('Test');
   });
 
@@ -90,7 +89,7 @@ describe('role-based authorization', () => {
   it('stops an agent from assigning conversations', async () => {
     const { agent, organization } = await createWorkspace();
     const customer = await createCustomer(organization.id);
-    const conversation = await prisma.conversation.create({
+    const conversation = await db().conversation.create({
       data: {
         organizationId: organization.id,
         customerId: customer.id,
@@ -109,7 +108,7 @@ describe('role-based authorization', () => {
     const { organization, agent, otherAgent, manager } = await createWorkspace();
     const customer = await createCustomer(organization.id);
 
-    await prisma.conversation.create({
+    await db().conversation.create({
       data: {
         organizationId: organization.id,
         customerId: customer.id,
@@ -136,7 +135,7 @@ describe('role-based authorization', () => {
     const { organization, agent, otherAgent } = await createWorkspace();
     const customer = await createCustomer(organization.id);
 
-    await prisma.conversation.createMany({
+    await db().conversation.createMany({
       data: [
         { organizationId: organization.id, customerId: customer.id, channel: Channel.WEBSITE },
         {

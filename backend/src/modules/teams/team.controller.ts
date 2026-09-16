@@ -1,79 +1,126 @@
-import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { body, params, query } from '../../middleware/validate';
-import { sendCreated, sendNoContent, sendSuccess } from '../../utils/response';
-import type { IdParam } from '../../utils/validation';
-import { auditContextFromRequest } from '../audit-logs/audit-log.service';
-import * as teamService from './team.service';
-import type {
-  CreateTeamInput,
-  ListTeamsQuery,
-  TeamMemberParam,
-  TeamMembersInput,
-  UpdateTeamInput,
-} from './team.schema';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiNoContentResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiEnvelopeCreatedResponse,
+  ApiEnvelopeResponse,
+  ApiPaginatedResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { PERMISSIONS } from '../../config/permissions';
+import { CurrentUser, RequirePermissions } from '../../common/decorators/auth.decorators';
+import {
+  Client,
+  type ClientContext,
+} from '../../common/decorators/client-context.decorator';
+import { IdParamDto } from '../../common/dto/id-param.dto';
+import { withMeta } from '../../common/http/api-response';
+import type { AuthContext } from '../../types/auth';
+import {
+  CreateTeamDto,
+  ListTeamsQueryDto,
+  TeamMemberParamDto,
+  TeamMembersDto,
+  UpdateTeamDto,
+} from './dto/team.dto';
+import { TeamService } from './team.service';
 
-export async function listTeamsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const result = await teamService.listTeams(auth.organizationId, query<ListTeamsQuery>(req));
-  return sendSuccess(res, result.items, 200, result.meta);
-}
+@ApiTags('Teams')
+@ApiBearerAuth('bearer')
+@ApiStandardErrors()
+@Controller('teams')
+export class TeamController {
+  constructor(private readonly teams: TeamService) {}
 
-export async function getTeamHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  return sendSuccess(res, await teamService.getTeamById(auth.organizationId, id));
-}
+  @Get()
+  @ApiOperation({ summary: 'List teams' })
+  @ApiPaginatedResponse()
+  @RequirePermissions(PERMISSIONS.TEAM_READ)
+  async list(@CurrentUser() auth: AuthContext, @Query() query: ListTeamsQueryDto) {
+    const result = await this.teams.list(auth.organizationId, query);
+    return withMeta(result.items, result.meta);
+  }
 
-export async function createTeamHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const team = await teamService.createTeam(
-    auth,
-    body<CreateTeamInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendCreated(res, team);
-}
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a team' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.TEAM_READ)
+  get(@CurrentUser() auth: AuthContext, @Param() { id }: IdParamDto) {
+    return this.teams.getById(auth.organizationId, id);
+  }
 
-export async function updateTeamHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const team = await teamService.updateTeam(
-    auth,
-    id,
-    body<UpdateTeamInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendSuccess(res, team);
-}
+  @Post()
+  @ApiOperation({ summary: 'Create a team' })
+  @ApiEnvelopeCreatedResponse()
+  @RequirePermissions(PERMISSIONS.TEAM_CREATE)
+  @HttpCode(HttpStatus.CREATED)
+  create(
+    @CurrentUser() auth: AuthContext,
+    @Body() dto: CreateTeamDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.teams.create(auth, dto, client);
+  }
 
-export async function deleteTeamHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  await teamService.deleteTeam(auth, id, auditContextFromRequest(req));
-  return sendNoContent(res);
-}
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update a team' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.TEAM_UPDATE)
+  update(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: UpdateTeamDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.teams.update(auth, id, dto, client);
+  }
 
-export async function addTeamMembersHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const team = await teamService.addTeamMembers(
-    auth,
-    id,
-    body<TeamMembersInput>(req),
-    auditContextFromRequest(req),
-  );
-  return sendSuccess(res, team);
-}
+  @Delete(':id')
+  @ApiOperation({ summary: 'Delete a team' })
+  @ApiNoContentResponse({ description: 'Deleted.' })
+  @RequirePermissions(PERMISSIONS.TEAM_DELETE)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Client() client: ClientContext,
+  ): Promise<void> {
+    await this.teams.remove(auth, id, client);
+  }
 
-export async function removeTeamMemberHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id, userId } = params<TeamMemberParam>(req);
-  const team = await teamService.removeTeamMember(
-    auth,
-    id,
-    userId,
-    auditContextFromRequest(req),
-  );
-  return sendSuccess(res, team);
+  @Post(':id/members')
+  @ApiOperation({ summary: 'Add members to a team' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.TEAM_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  addMembers(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: TeamMembersDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.teams.addMembers(auth, id, dto, client);
+  }
+
+  @Delete(':id/members/:userId')
+  @ApiOperation({ summary: 'Remove a member from a team' })
+  @ApiEnvelopeResponse()
+  @RequirePermissions(PERMISSIONS.TEAM_UPDATE)
+  removeMember(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id, userId }: TeamMemberParamDto,
+    @Client() client: ClientContext,
+  ) {
+    return this.teams.removeMember(auth, id, userId, client);
+  }
 }

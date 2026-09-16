@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { api, createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { api, createWorkspace, db } from '../helpers/factories';
 import { IntegrationStatus, IntegrationType } from '../../src/generated/prisma/enums';
 
 /**
@@ -29,7 +28,7 @@ function sign(body: string, secret = APP_SECRET): string {
 }
 
 async function connectPage(organizationId: string, externalPageId: string) {
-  return prisma.integration.create({
+  return db().integration.create({
     data: {
       organizationId,
       type: IntegrationType.FACEBOOK,
@@ -74,7 +73,7 @@ function messengerPayload(input: {
 async function waitForMessage(externalMessageId: string, timeoutMs = 8_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const message = await prisma.message.findUnique({ where: { externalMessageId } });
+    const message = await db().message.findUnique({ where: { externalMessageId } });
     if (message) return message;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -166,7 +165,7 @@ describe('POST /api/webhooks/facebook', () => {
     expect(message?.organizationId).toBe(organization.id);
     expect(message?.senderType).toBe('CUSTOMER');
 
-    const conversation = await prisma.conversation.findUniqueOrThrow({
+    const conversation = await db().conversation.findUniqueOrThrow({
       where: { id: message?.conversationId as string },
       select: { organizationId: true, integrationId: true, channel: true, unreadCount: true },
     });
@@ -194,7 +193,7 @@ describe('POST /api/webhooks/facebook', () => {
 
     await waitForMessage(mid);
 
-    const events = await prisma.webhookEvent.findMany({
+    const events = await db().webhookEvent.findMany({
       where: { provider: 'facebook' },
       orderBy: { receivedAt: 'desc' },
       take: 5,
@@ -231,7 +230,7 @@ describe('POST /api/webhooks/facebook', () => {
     // Give the second delivery time to be processed and discarded.
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    const messages = await prisma.message.findMany({
+    const messages = await db().message.findMany({
       where: { organizationId: organization.id, content: 'Only once' },
     });
     expect(messages).toHaveLength(1);
@@ -259,7 +258,7 @@ describe('POST /api/webhooks/facebook', () => {
     expect(response.status).toBe(200);
 
     await new Promise((resolve) => setTimeout(resolve, 500));
-    const message = await prisma.message.findUnique({ where: { externalMessageId: mid } });
+    const message = await db().message.findUnique({ where: { externalMessageId: mid } });
     expect(message).toBeNull();
   });
 
@@ -301,7 +300,7 @@ describe('POST /api/webhooks/facebook', () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     // Already a row from the send path; ingesting the echo would duplicate it.
-    const message = await prisma.message.findUnique({ where: { externalMessageId: mid } });
+    const message = await db().message.findUnique({ where: { externalMessageId: mid } });
     expect(message).toBeNull();
   });
 
@@ -342,7 +341,7 @@ describe('POST /api/webhooks/facebook', () => {
     expect(message?.content).toBe('Replied from Business Suite');
 
     // The customer is the recipient on an echo, so the identity must be theirs.
-    const channel = await prisma.customerChannel.findFirst({
+    const channel = await db().customerChannel.findFirst({
       where: { externalUserId: 'psid-600' },
     });
     expect(channel).not.toBeNull();

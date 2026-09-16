@@ -1,29 +1,64 @@
-import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { params, query } from '../../middleware/validate';
-import { sendSuccess } from '../../utils/response';
-import type { IdParam } from '../../utils/validation';
-import * as service from './notification.service';
-import type { ListNotificationsQuery } from './notification.schema';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiEnvelopeResponse,
+  ApiPaginatedResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { CurrentUser } from '../../common/decorators/auth.decorators';
+import { IdParamDto } from '../../common/dto/id-param.dto';
+import { withMeta } from '../../common/http/api-response';
+import type { AuthContext } from '../../types/auth';
+import { ListNotificationsQueryDto } from './dto/list-notifications.dto';
+import { NotificationService } from './notification.service';
 
-export async function listNotificationsHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const result = await service.listNotifications(auth, query<ListNotificationsQuery>(req));
-  return sendSuccess(res, { items: result.items, unread: result.unread }, 200, result.meta);
-}
+/**
+ * No permission checks here: every route is implicitly scoped to the caller's
+ * own notifications, so there is nothing an authenticated user should not see.
+ */
+@ApiTags('Notifications')
+@ApiBearerAuth('bearer')
+@ApiStandardErrors()
+@Controller('notifications')
+export class NotificationController {
+  constructor(private readonly notifications: NotificationService) {}
 
-export async function unreadCountHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  return sendSuccess(res, { unread: await service.getUnreadCount(auth) });
-}
+  @Get()
+  @ApiOperation({ summary: 'List the caller’s notifications' })
+  @ApiPaginatedResponse()
+  async list(@CurrentUser() auth: AuthContext, @Query() query: ListNotificationsQueryDto) {
+    const result = await this.notifications.list(auth, query);
+    return withMeta({ items: result.items, unread: result.unread }, result.meta);
+  }
 
-export async function markReadHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  return sendSuccess(res, await service.markNotificationRead(auth, id));
-}
+  @Get('unread-count')
+  @ApiOperation({ summary: 'Count the caller’s unread notifications' })
+  @ApiEnvelopeResponse()
+  async unreadCount(@CurrentUser() auth: AuthContext) {
+    return { unread: await this.notifications.getUnreadCount(auth) };
+  }
 
-export async function markAllReadHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  return sendSuccess(res, await service.markAllNotificationsRead(auth));
+  @Post('read-all')
+  @ApiOperation({ summary: 'Mark every notification read' })
+  @ApiEnvelopeResponse()
+  @HttpCode(HttpStatus.OK)
+  markAllRead(@CurrentUser() auth: AuthContext) {
+    return this.notifications.markAllRead(auth);
+  }
+
+  @Patch(':id/read')
+  @ApiOperation({ summary: 'Mark one notification read' })
+  @ApiEnvelopeResponse()
+  markRead(@CurrentUser() auth: AuthContext, @Param() { id }: IdParamDto) {
+    return this.notifications.markRead(auth, id);
+  }
 }

@@ -1,21 +1,71 @@
-import type { Request, Response } from 'express';
-import { getAuth } from '../../middleware/authenticate';
-import { body, params, query } from '../../middleware/validate';
-import { sendCreated, sendSuccess } from '../../utils/response';
-import type { IdParam } from '../../utils/validation';
-import * as messageService from './message.service';
-import type { ListMessagesQuery, SendMessageInput } from './message.schema';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCursorPaginatedResponse,
+  ApiEnvelopeCreatedResponse,
+  ApiStandardErrors,
+} from '../../common/decorators/api-docs.decorators';
+import { Throttle } from '@nestjs/throttler';
+import { PERMISSIONS } from '../../config/permissions';
+import { CurrentUser, RequirePermissions } from '../../common/decorators/auth.decorators';
+import { IdParamDto } from '../../common/dto/id-param.dto';
+import { withMeta } from '../../common/http/api-response';
+import { THROTTLERS } from '../../common/throttler/throttler.constants';
+import type { AuthContext } from '../../types/auth';
+import { ListMessagesQueryDto, SendMessageDto } from './dto/message.dto';
+import { MessageService } from './message.service';
 
-export async function listMessagesHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const result = await messageService.listMessages(auth, id, query<ListMessagesQuery>(req));
-  return sendSuccess(res, result.items, 200, result.meta);
-}
+/**
+ * A conversation's messages, mounted under the thread they belong to.
+ *
+ * `:id` is the conversation id, matching the path the Express router served,
+ * so no client has to change.
+ */
+@ApiTags('Messages')
+@ApiBearerAuth('bearer')
+@ApiStandardErrors()
+@Controller('conversations/:id/messages')
+export class MessageController {
+  constructor(private readonly messages: MessageService) {}
 
-export async function sendMessageHandler(req: Request, res: Response) {
-  const auth = getAuth(req);
-  const { id } = params<IdParam>(req);
-  const message = await messageService.sendMessage(auth, id, body<SendMessageInput>(req));
-  return sendCreated(res, message);
+  @Get()
+  @ApiOperation({ summary: 'List a conversation’s messages' })
+  @ApiCursorPaginatedResponse()
+  @RequirePermissions(PERMISSIONS.MESSAGE_READ)
+  async list(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Query() query: ListMessagesQueryDto,
+  ) {
+    const result = await this.messages.list(auth, id, query);
+    return withMeta(result.items, result.meta);
+  }
+
+  /**
+   * Carries the per-user message budget on top of the global one: an outbound
+   * message costs money at the provider, so it is metered separately from
+   * ordinary API traffic.
+   */
+  @Post()
+  @ApiOperation({ summary: 'Send a reply, or post an internal note' })
+  @ApiEnvelopeCreatedResponse()
+  @RequirePermissions(PERMISSIONS.MESSAGE_SEND)
+  @Throttle({ [THROTTLERS.MESSAGE]: {} })
+  @HttpCode(HttpStatus.CREATED)
+  send(
+    @CurrentUser() auth: AuthContext,
+    @Param() { id }: IdParamDto,
+    @Body() dto: SendMessageDto,
+  ) {
+    return this.messages.send(auth, id, dto);
+  }
 }

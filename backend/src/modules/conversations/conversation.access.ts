@@ -1,7 +1,8 @@
-import { prisma } from '../../database/prisma';
-import type { Prisma } from '../../generated/prisma/client';
+import { Injectable } from '@nestjs/common';
 import { PERMISSIONS } from '../../config/permissions';
-import { NotFoundError } from '../../utils/errors';
+import { NotFoundError } from '../../common/errors/app.error';
+import { PrismaService } from '../../database/prisma.service';
+import type { Prisma } from '../../generated/prisma/client';
 import type { AuthContext } from '../../types/auth';
 
 export interface ConversationAccessRow {
@@ -52,21 +53,33 @@ export function visibilityFilter(actor: AuthContext): Prisma.ConversationWhereIn
 }
 
 /**
- * Loads a conversation the actor is allowed to see.
+ * The gate every conversation-scoped read and write goes through.
  *
- * Returns 404 rather than 403 when the conversation exists but is out of scope:
- * confirming existence would leak that another team is talking to that customer.
+ * A provider rather than a bare function so it can be injected by the message,
+ * note and assignment services, which all need the same check before they touch
+ * a thread.
  */
-export async function assertConversationAccess(
-  actor: AuthContext,
-  conversationId: string,
-): Promise<ConversationAccessRow> {
-  const conversation = await prisma.conversation.findFirst({
-    where: { id: conversationId, ...visibilityFilter(actor) },
-    select: accessSelect,
-  });
-  if (!conversation) {
-    throw new NotFoundError('Conversation', 'CONVERSATION_NOT_FOUND');
+@Injectable()
+export class ConversationAccessService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Loads a conversation the actor is allowed to see.
+   *
+   * Returns 404 rather than 403 when the conversation exists but is out of scope:
+   * confirming existence would leak that another team is talking to that customer.
+   */
+  async assertAccess(
+    actor: AuthContext,
+    conversationId: string,
+  ): Promise<ConversationAccessRow> {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, ...visibilityFilter(actor) },
+      select: accessSelect,
+    });
+    if (!conversation) {
+      throw new NotFoundError('Conversation', 'CONVERSATION_NOT_FOUND');
+    }
+    return conversation;
   }
-  return conversation;
 }

@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { api, createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { api, createWorkspace, db } from '../helpers/factories';
 import { Channel, IntegrationStatus, IntegrationType } from '../../src/generated/prisma/enums';
 
 /**
@@ -28,7 +27,7 @@ function sign(body: string, secret = APP_SECRET): string {
 }
 
 async function connectInstagram(organizationId: string, accountId: string) {
-  return prisma.integration.create({
+  return db().integration.create({
     data: {
       organizationId,
       type: IntegrationType.INSTAGRAM,
@@ -68,7 +67,7 @@ function instagramPayload(input: {
 async function waitForMessage(externalMessageId: string, timeoutMs = 8_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const message = await prisma.message.findUnique({ where: { externalMessageId } });
+    const message = await db().message.findUnique({ where: { externalMessageId } });
     if (message) return message;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -135,7 +134,7 @@ describe('POST /api/webhooks/instagram', () => {
     expect(message?.content).toBe('Is this still available?');
     expect(message?.organizationId).toBe(organization.id);
 
-    const conversation = await prisma.conversation.findUnique({
+    const conversation = await db().conversation.findUnique({
       where: { id: message?.conversationId ?? '' },
       select: { channel: true },
     });
@@ -149,7 +148,7 @@ describe('POST /api/webhooks/instagram', () => {
     // The same external id under both types. The unique index is on
     // (type, externalPageId), so these are two distinct inboxes — this is what
     // stops an Instagram delivery landing on a Facebook conversation.
-    await prisma.integration.create({
+    await db().integration.create({
       data: {
         organizationId: organization.id,
         type: IntegrationType.FACEBOOK,
@@ -175,7 +174,7 @@ describe('POST /api/webhooks/instagram', () => {
     const message = await waitForMessage(mid);
     expect(message).not.toBeNull();
 
-    const conversation = await prisma.conversation.findUnique({
+    const conversation = await db().conversation.findUnique({
       where: { id: message?.conversationId ?? '' },
       select: { channel: true, integration: { select: { type: true } } },
     });
@@ -199,6 +198,6 @@ describe('POST /api/webhooks/instagram', () => {
       .expect(200);
 
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(await prisma.message.findUnique({ where: { externalMessageId: mid } })).toBeNull();
+    expect(await db().message.findUnique({ where: { externalMessageId: mid } })).toBeNull();
   });
 });

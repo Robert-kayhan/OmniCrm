@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
-import { env } from '../../config/env';
-import { logger } from '../../config/logger';
-import { getRedis, isRedisEnabled } from '../../database/redis';
-import { decryptSecret, encryptSecret, safeEqual } from '../../utils/crypto';
-import { UnauthorizedError } from '../../utils/errors';
+import { Injectable, Logger } from '@nestjs/common';
 import type { MetaManagedPage } from '../../channels/meta/meta.oauth';
+import { CryptoService } from '../../common/crypto/crypto.service';
+import { UnauthorizedError } from '../../common/errors/app.error';
+import { AppConfigService } from '../../config/app-config.service';
+import { RedisService } from '../../database/redis.service';
 
 /**
  * The two pieces of short-lived state the OAuth flow needs.
@@ -23,61 +23,6 @@ interface StatePayload {
   userId: string;
   nonce: string;
   expiresAt: number;
-}
-
-/**
- * Derived from JWT_SECRET rather than reusing it directly, so an OAuth state
- * can never be mistaken for — or forged from — a session token.
- */
-function stateKey(): Buffer {
-  return crypto.createHmac('sha256', env.JWT_SECRET).update('facebook-oauth-state').digest();
-}
-
-function sign(body: string): string {
-  return crypto.createHmac('sha256', stateKey()).update(body).digest('base64url');
-}
-
-/** Packs the operator's identity into the opaque `state` Meta echoes back. */
-export function createState(organizationId: string, userId: string): string {
-  const payload: StatePayload = {
-    organizationId,
-    userId,
-    nonce: crypto.randomBytes(16).toString('base64url'),
-    expiresAt: Date.now() + STATE_TTL_MS,
-  };
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return `${body}.${sign(body)}`;
-}
-
-/**
- * Verifies and unpacks a returned `state`.
- *
- * Throws rather than returning null: every failure here means the callback did
- * not originate from a login this server started, which is not a case any
- * caller should be able to shrug off.
- */
-export function readState(state: string | undefined): StatePayload {
-  const invalid = new UnauthorizedError(
-    'This Facebook login link is invalid or has expired. Start the connection again.',
-    'FACEBOOK_OAUTH_STATE_INVALID',
-  );
-
-  if (!state) throw invalid;
-  const [body, signature] = state.split('.');
-  if (!body || !signature) throw invalid;
-  if (!safeEqual(signature, sign(body))) throw invalid;
-
-  let payload: StatePayload;
-  try {
-    payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as StatePayload;
-  } catch {
-    throw invalid;
-  }
-
-  if (!payload.organizationId || !payload.userId) throw invalid;
-  if (typeof payload.expiresAt !== 'number' || payload.expiresAt < Date.now()) throw invalid;
-
-  return payload;
 }
 
 /**
@@ -100,94 +45,181 @@ interface StoredHandoff {
   pages: Array<Omit<MetaManagedPage, 'accessToken'> & { encryptedAccessToken: string }>;
 }
 
-/**
- * The single-node fallback.
- *
- * Redis is optional in this codebase, so the flow degrades to process memory
- * with the same TTL. A multi-instance deployment needs REDIS_URL — production
- * env validation already requires it — because the callback and the page
- * selection can otherwise land on different instances.
- */
-const memoryStore = new Map<string, { value: StoredHandoff; expiresAt: number }>();
+@Injectable()
+export class MetaOAuthStore {
+  private readonly logger = new Logger(MetaOAuthStore.name);
 
-function sweepMemory(): void {
-  const now = Date.now();
-  for (const [key, entry] of memoryStore) {
-    if (entry.expiresAt <= now) memoryStore.delete(key);
+  /**
+   * The single-node fallback.
+   *
+   * Redis is optional in this codebase, so the flow degrades to process memory
+   * with the same TTL. A multi-instance deployment needs REDIS_URL — production
+   * env validation already requires it — because the callback and the page
+   * selection can otherwise land on different instances.
+   */
+  private readonly memoryStore = new Map<string, { value: StoredHandoff; expiresAt: number }>();
+
+  constructor(
+    private readonly config: AppConfigService,
+    private readonly crypto: CryptoService,
+    private readonly redis: RedisService,
+  ) {}
+
+  /**
+   * Derived from JWT_SECRET rather than reusing it directly, so an OAuth state
+   * can never be mistaken for — or forged from — a session token.
+   */
+  private stateKey(): Buffer {
+    return crypto
+      .createHmac('sha256', this.config.get('JWT_SECRET'))
+      .update('facebook-oauth-state')
+      .digest();
   }
-}
 
-function redisKey(handoffId: string): string {
-  return `facebook:oauth:handoff:${handoffId}`;
-}
+  private sign(body: string): string {
+    return crypto.createHmac('sha256', this.stateKey()).update(body).digest('base64url');
+  }
 
-function encode(handoff: PendingHandoff): StoredHandoff {
-  return {
-    organizationId: handoff.organizationId,
-    userId: handoff.userId,
-    pages: handoff.pages.map(({ accessToken, ...page }) => ({
-      ...page,
-      encryptedAccessToken: encryptSecret(accessToken),
-    })),
-  };
-}
+  /** Packs the operator's identity into the opaque `state` Meta echoes back. */
+  createState(organizationId: string, userId: string): string {
+    const payload: StatePayload = {
+      organizationId,
+      userId,
+      nonce: crypto.randomBytes(16).toString('base64url'),
+      expiresAt: Date.now() + STATE_TTL_MS,
+    };
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    return `${body}.${this.sign(body)}`;
+  }
 
-function decode(stored: StoredHandoff): PendingHandoff {
-  return {
-    organizationId: stored.organizationId,
-    userId: stored.userId,
-    pages: stored.pages.map(({ encryptedAccessToken, ...page }) => ({
-      ...page,
-      accessToken: decryptSecret(encryptedAccessToken),
-    })),
-  };
-}
+  /**
+   * Verifies and unpacks a returned `state`.
+   *
+   * Throws rather than returning null: every failure here means the callback did
+   * not originate from a login this server started, which is not a case any
+   * caller should be able to shrug off.
+   */
+  readState(state: string | undefined): StatePayload {
+    const invalid = new UnauthorizedError(
+      'This Facebook login link is invalid or has expired. Start the connection again.',
+      'FACEBOOK_OAUTH_STATE_INVALID',
+    );
 
-export async function saveHandoff(handoff: PendingHandoff): Promise<string> {
-  const handoffId = crypto.randomBytes(24).toString('base64url');
-  const stored = encode(handoff);
+    if (!state) throw invalid;
+    const [body, signature] = state.split('.');
+    if (!body || !signature) throw invalid;
+    if (!this.crypto.safeEqual(signature, this.sign(body))) throw invalid;
 
-  const redis = isRedisEnabled() ? getRedis() : null;
-  if (redis) {
+    let payload: StatePayload;
     try {
-      await redis.set(redisKey(handoffId), JSON.stringify(stored), 'EX', HANDOFF_TTL_SECONDS);
-      return handoffId;
-    } catch (error) {
-      logger.warn({ err: error }, 'Redis unavailable for OAuth handoff; using process memory');
+      payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as StatePayload;
+    } catch {
+      throw invalid;
+    }
+
+    if (!payload.organizationId || !payload.userId) throw invalid;
+    if (typeof payload.expiresAt !== 'number' || payload.expiresAt < Date.now()) throw invalid;
+
+    return payload;
+  }
+
+  private sweepMemory(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.memoryStore) {
+      if (entry.expiresAt <= now) this.memoryStore.delete(key);
     }
   }
 
-  sweepMemory();
-  memoryStore.set(handoffId, { value: stored, expiresAt: Date.now() + HANDOFF_TTL_SECONDS * 1000 });
-  return handoffId;
-}
-
-export async function readHandoff(handoffId: string): Promise<PendingHandoff | null> {
-  const redis = isRedisEnabled() ? getRedis() : null;
-  if (redis) {
-    try {
-      const raw = await redis.get(redisKey(handoffId));
-      if (raw) return decode(JSON.parse(raw) as StoredHandoff);
-    } catch (error) {
-      logger.warn({ err: error }, 'Redis read failed for OAuth handoff; falling back to memory');
-    }
+  private redisKey(handoffId: string): string {
+    return `facebook:oauth:handoff:${handoffId}`;
   }
 
-  sweepMemory();
-  const entry = memoryStore.get(handoffId);
-  if (!entry) return null;
-  return decode(entry.value);
-}
-
-/** Called once a Page is connected — the remaining tokens have no further use. */
-export async function discardHandoff(handoffId: string): Promise<void> {
-  const redis = isRedisEnabled() ? getRedis() : null;
-  if (redis) {
-    try {
-      await redis.del(redisKey(handoffId));
-    } catch (error) {
-      logger.warn({ err: error }, 'Redis delete failed for OAuth handoff');
-    }
+  private redisClient() {
+    return this.redis.enabled ? this.redis.getClient() : null;
   }
-  memoryStore.delete(handoffId);
+
+  private encode(handoff: PendingHandoff): StoredHandoff {
+    return {
+      organizationId: handoff.organizationId,
+      userId: handoff.userId,
+      pages: handoff.pages.map(({ accessToken, ...page }) => ({
+        ...page,
+        encryptedAccessToken: this.crypto.encryptSecret(accessToken),
+      })),
+    };
+  }
+
+  private decode(stored: StoredHandoff): PendingHandoff {
+    return {
+      organizationId: stored.organizationId,
+      userId: stored.userId,
+      pages: stored.pages.map(({ encryptedAccessToken, ...page }) => ({
+        ...page,
+        accessToken: this.crypto.decryptSecret(encryptedAccessToken),
+      })),
+    };
+  }
+
+  async saveHandoff(handoff: PendingHandoff): Promise<string> {
+    const handoffId = crypto.randomBytes(24).toString('base64url');
+    const stored = this.encode(handoff);
+
+    const redis = this.redisClient();
+    if (redis) {
+      try {
+        await redis.set(
+          this.redisKey(handoffId),
+          JSON.stringify(stored),
+          'EX',
+          HANDOFF_TTL_SECONDS,
+        );
+        return handoffId;
+      } catch (error) {
+        this.logger.warn(
+          { err: error },
+          'Redis unavailable for OAuth handoff; using process memory',
+        );
+      }
+    }
+
+    this.sweepMemory();
+    this.memoryStore.set(handoffId, {
+      value: stored,
+      expiresAt: Date.now() + HANDOFF_TTL_SECONDS * 1000,
+    });
+    return handoffId;
+  }
+
+  async readHandoff(handoffId: string): Promise<PendingHandoff | null> {
+    const redis = this.redisClient();
+    if (redis) {
+      try {
+        const raw = await redis.get(this.redisKey(handoffId));
+        if (raw) return this.decode(JSON.parse(raw) as StoredHandoff);
+      } catch (error) {
+        this.logger.warn(
+          { err: error },
+          'Redis read failed for OAuth handoff; falling back to memory',
+        );
+      }
+    }
+
+    this.sweepMemory();
+    const entry = this.memoryStore.get(handoffId);
+    if (!entry) return null;
+    return this.decode(entry.value);
+  }
+
+  /** Called once a Page is connected — the remaining tokens have no further use. */
+  async discardHandoff(handoffId: string): Promise<void> {
+    const redis = this.redisClient();
+    if (redis) {
+      try {
+        await redis.del(this.redisKey(handoffId));
+      } catch (error) {
+        this.logger.warn({ err: error }, 'Redis delete failed for OAuth handoff');
+      }
+    }
+    this.memoryStore.delete(handoffId);
+  }
 }

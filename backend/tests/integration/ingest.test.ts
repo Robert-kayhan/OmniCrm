@@ -1,21 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { createWorkspace } from '../helpers/factories';
-import { prisma } from '../../src/database/prisma';
+import { createWorkspace, db, testApp } from '../helpers/factories';
 import { Channel, IntegrationStatus, IntegrationType } from '../../src/generated/prisma/enums';
 import {
-  ingestNormalizedMessage,
+  ConversationIngestService,
   type ResolvedIntegration,
 } from '../../src/modules/conversations/conversation.ingest';
 import type { NormalizedMessage } from '../../src/channels';
 
+/** The intake service, resolved from the running application's container. */
+const ingest = () => testApp().get(ConversationIngestService);
+
 /**
  * These exercise the channel-agnostic intake path directly. Every provider
- * webhook funnels into `ingestNormalizedMessage`, so the guarantees proven here
+ * webhook funnels into the ingest service, so the guarantees proven here
  * (one customer per identity, one message per provider id) hold for Facebook,
  * Instagram, email and website chat alike.
  */
 async function seedIntegration(organizationId: string): Promise<ResolvedIntegration> {
-  return prisma.integration.create({
+  return db().integration.create({
     data: {
       organizationId,
       type: IntegrationType.FACEBOOK,
@@ -47,7 +49,7 @@ describe('inbound message ingestion', () => {
     const { organization } = await createWorkspace();
     const integration = await seedIntegration(organization.id);
 
-    const result = await ingestNormalizedMessage(integration, inbound());
+    const result = await ingest().ingest(integration, inbound());
 
     expect(result.created).toBe(true);
     expect(result.customerCreated).toBe(true);
@@ -55,14 +57,14 @@ describe('inbound message ingestion', () => {
     expect(result.message?.content).toBe('Hello there');
     expect(result.message?.senderType).toBe('CUSTOMER');
 
-    const customer = await prisma.customer.findFirstOrThrow({
+    const customer = await db().customer.findFirstOrThrow({
       where: { organizationId: organization.id },
     });
     expect(customer.firstName).toBe('John');
     expect(customer.lastName).toBe('Smith');
     expect(customer.source).toBe('FACEBOOK');
 
-    const channel = await prisma.customerChannel.findFirstOrThrow({
+    const channel = await db().customerChannel.findFirstOrThrow({
       where: { customerId: customer.id },
     });
     expect(channel.externalUserId).toBe('psid-100');
@@ -72,16 +74,16 @@ describe('inbound message ingestion', () => {
     const { organization } = await createWorkspace();
     const integration = await seedIntegration(organization.id);
 
-    await ingestNormalizedMessage(integration, inbound());
-    const second = await ingestNormalizedMessage(integration, inbound({ content: 'Still there?' }));
+    await ingest().ingest(integration, inbound());
+    const second = await ingest().ingest(integration, inbound({ content: 'Still there?' }));
 
     expect(second.created).toBe(true);
     expect(second.customerCreated).toBe(false);
     expect(second.conversationCreated).toBe(false);
 
-    expect(await prisma.customer.count({ where: { organizationId: organization.id } })).toBe(1);
-    expect(await prisma.conversation.count({ where: { organizationId: organization.id } })).toBe(1);
-    expect(await prisma.message.count({ where: { organizationId: organization.id } })).toBe(2);
+    expect(await db().customer.count({ where: { organizationId: organization.id } })).toBe(1);
+    expect(await db().conversation.count({ where: { organizationId: organization.id } })).toBe(1);
+    expect(await db().message.count({ where: { organizationId: organization.id } })).toBe(2);
   });
 
   it('ignores a redelivered webhook with the same provider message id', async () => {
@@ -89,13 +91,13 @@ describe('inbound message ingestion', () => {
     const integration = await seedIntegration(organization.id);
     const message = inbound();
 
-    const first = await ingestNormalizedMessage(integration, message);
-    const replay = await ingestNormalizedMessage(integration, message);
+    const first = await ingest().ingest(integration, message);
+    const replay = await ingest().ingest(integration, message);
 
     expect(first.created).toBe(true);
     expect(replay.created).toBe(false);
     expect(replay.message).toBeNull();
-    expect(await prisma.message.count({ where: { organizationId: organization.id } })).toBe(1);
+    expect(await db().message.count({ where: { organizationId: organization.id } })).toBe(1);
   });
 
   it('survives two identical deliveries racing each other', async () => {
@@ -105,22 +107,22 @@ describe('inbound message ingestion', () => {
 
     // Both pass the pre-check; the unique index decides the winner.
     const results = await Promise.all([
-      ingestNormalizedMessage(integration, message),
-      ingestNormalizedMessage(integration, message),
+      ingest().ingest(integration, message),
+      ingest().ingest(integration, message),
     ]);
 
     expect(results.filter((result) => result.created)).toHaveLength(1);
-    expect(await prisma.message.count({ where: { organizationId: organization.id } })).toBe(1);
+    expect(await db().message.count({ where: { organizationId: organization.id } })).toBe(1);
   });
 
   it('increments the unread counter and stamps the customer timestamp', async () => {
     const { organization } = await createWorkspace();
     const integration = await seedIntegration(organization.id);
 
-    await ingestNormalizedMessage(integration, inbound());
-    await ingestNormalizedMessage(integration, inbound());
+    await ingest().ingest(integration, inbound());
+    await ingest().ingest(integration, inbound());
 
-    const conversation = await prisma.conversation.findFirstOrThrow({
+    const conversation = await db().conversation.findFirstOrThrow({
       where: { organizationId: organization.id },
     });
     expect(conversation.unreadCount).toBe(2);
@@ -132,19 +134,19 @@ describe('inbound message ingestion', () => {
     const { organization } = await createWorkspace();
     const integration = await seedIntegration(organization.id);
 
-    await ingestNormalizedMessage(integration, inbound());
-    await prisma.conversation.updateMany({
+    await ingest().ingest(integration, inbound());
+    await db().conversation.updateMany({
       where: { organizationId: organization.id },
       data: { status: 'CLOSED', closedAt: new Date() },
     });
 
-    const second = await ingestNormalizedMessage(integration, inbound({ content: 'New issue' }));
+    const second = await ingest().ingest(integration, inbound({ content: 'New issue' }));
 
     expect(second.conversationCreated).toBe(true);
-    expect(await prisma.conversation.count({ where: { organizationId: organization.id } })).toBe(2);
+    expect(await db().conversation.count({ where: { organizationId: organization.id } })).toBe(2);
     // The resolved thread stays resolved.
     expect(
-      await prisma.conversation.count({
+      await db().conversation.count({
         where: { organizationId: organization.id, status: 'CLOSED' },
       }),
     ).toBe(1);
@@ -153,7 +155,7 @@ describe('inbound message ingestion', () => {
   it('keeps two identities on separate integrations apart', async () => {
     const { organization } = await createWorkspace();
     const first = await seedIntegration(organization.id);
-    const second = await prisma.integration.create({
+    const second = await db().integration.create({
       data: {
         organizationId: organization.id,
         type: IntegrationType.INSTAGRAM,
@@ -164,27 +166,27 @@ describe('inbound message ingestion', () => {
       select: { id: true, organizationId: true, status: true },
     });
 
-    await ingestNormalizedMessage(first, inbound());
-    await ingestNormalizedMessage(
+    await ingest().ingest(first, inbound());
+    await ingest().ingest(
       second,
       inbound({ channel: Channel.INSTAGRAM, contact: { externalUserId: 'psid-100' } }),
     );
 
     // The same raw id on two providers is two different people.
-    expect(await prisma.customer.count({ where: { organizationId: organization.id } })).toBe(2);
+    expect(await db().customer.count({ where: { organizationId: organization.id } })).toBe(2);
   });
 
   it('attributes a provider echo of an outbound message to the agent side', async () => {
     const { organization } = await createWorkspace();
     const integration = await seedIntegration(organization.id);
 
-    const result = await ingestNormalizedMessage(
+    const result = await ingest().ingest(
       integration,
       inbound({ direction: 'OUTBOUND', content: 'Sent from the Page inbox' }),
     );
 
     expect(result.message?.senderType).toBe('AGENT');
-    const conversation = await prisma.conversation.findFirstOrThrow({
+    const conversation = await db().conversation.findFirstOrThrow({
       where: { organizationId: organization.id },
     });
     // An outbound echo is not an unread customer message.
@@ -195,7 +197,7 @@ describe('inbound message ingestion', () => {
     const { organization } = await createWorkspace();
     const integration = await seedIntegration(organization.id);
 
-    const result = await ingestNormalizedMessage(
+    const result = await ingest().ingest(
       integration,
       inbound({
         messageType: 'IMAGE',
@@ -215,14 +217,14 @@ describe('inbound message ingestion', () => {
     // Two distinct messages (different provider ids, so the dedupe guard does
     // not apply) from a sender we have never seen, arriving together.
     const results = await Promise.all([
-      ingestNormalizedMessage(integration, inbound({ content: 'first' })),
-      ingestNormalizedMessage(integration, inbound({ content: 'second' })),
+      ingest().ingest(integration, inbound({ content: 'first' })),
+      ingest().ingest(integration, inbound({ content: 'second' })),
     ]);
 
     expect(results.every((result) => result.created)).toBe(true);
     // Both messages land, but on one customer and one thread.
-    expect(await prisma.message.count({ where: { organizationId: organization.id } })).toBe(2);
-    expect(await prisma.customer.count({ where: { organizationId: organization.id } })).toBe(1);
-    expect(await prisma.conversation.count({ where: { organizationId: organization.id } })).toBe(1);
+    expect(await db().message.count({ where: { organizationId: organization.id } })).toBe(2);
+    expect(await db().customer.count({ where: { organizationId: organization.id } })).toBe(1);
+    expect(await db().conversation.count({ where: { organizationId: organization.id } })).toBe(1);
   });
 });
