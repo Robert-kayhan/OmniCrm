@@ -161,6 +161,55 @@
   }
 }
 
+/*
+ * Marketing-page motion that must run before hydration: the hero text entrance
+ * and the call-to-action sheen. Scroll reveals live in components/marketing/motion.tsx.
+ * Both switch off entirely for visitors who prefer reduced motion.
+ */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.cta-sheen {
+  background:
+    radial-gradient(600px circle at var(--sheen-x, 20%) 0%, oklch(1 0 0 / 0.18), transparent 60%),
+    radial-gradient(500px circle at 100% 120%, oklch(0.3 0.15 262 / 0.45), transparent 60%);
+}
+
+@property --sheen-x {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 20%;
+}
+
+@keyframes sheen {
+  0%,
+  100% {
+    --sheen-x: 10%;
+  }
+  50% {
+    --sheen-x: 90%;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cta-sheen {
+    animation: sheen 12s ease-in-out infinite;
+  }
+
+  .animate-rise {
+    animation: rise 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: var(--delay, 0ms);
+  }
+}
+
 @layer utilities {
   /* Slim scrollbars for the conversation and message panes. */
   .scrollbar-thin {

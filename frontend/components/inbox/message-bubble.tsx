@@ -164,7 +164,7 @@ export function MessageBubble({
             )}
           >
             {message.isInternal ? (
-              <span className="mb-1 flex items-center gap-1 text-xs font-medium text-warning-foreground/80">
+              <span className="mb-1 flex items-center gap-1 text-xs font-medium text-foreground/70">
                 <Lock className="size-3" />
                 Internal note — not sent to the customer
               </span>
